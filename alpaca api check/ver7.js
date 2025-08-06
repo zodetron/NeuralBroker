@@ -1,105 +1,120 @@
-require("dotenv").config();
-const Alpaca = require("@alpacahq/alpaca-trade-api");
-const { EMA } = require("technicalindicators");
+// ema-strategy.js
+
+require('dotenv').config();
+const Alpaca = require('@alpacahq/alpaca-trade-api');
+const { EMA } = require('technicalindicators');
 
 const alpaca = new Alpaca({
-  keyId: process.env.API_KEY,
-  secretKey: process.env.SECRET_KEY,
-  paper: true, // use true for paper trading
-  usePolygon: false, // required for crypto
+  keyId: process.env.ALPACA_KEY_ID,
+  secretKey: process.env.ALPACA_SECRET_KEY,
+  paper: true,
+  usePolygon: false,
+  baseUrl: process.env.ALPACA_BASE_URL,
 });
 
-const SYMBOL = "BTC/USD"; // Crypto pair
-let lastSignal = null; // "buy" or "sell"
+const SYMBOL = 'BTC/USD';
+const TIMEFRAME = '5Min';
+const LIMIT = 100;
 
-async function fetchBars() {
+async function fetchBars(symbol) {
   try {
-    const response = await alpaca.getCryptoBarsV3(
-      SYMBOL,
-      { timeframe: "1Min", limit: 50 },
-      { exchanges: ["CBSE"] }
-    );
+    const bars = await alpaca.getCryptoBars({
+      symbol,
+      timeframe: "1Min",
+      limit: 100, // fetch at least 20+ bars
+    });
 
-    const bars = response.bars[SYMBOL];
+    console.log(`Fetched ${bars[symbol]?.length} bars for ${symbol}`); // ✅ Log here
 
-    if (!bars || bars.length < 20) {
-      console.error("❌ Not enough bar data");
-      return null;
-    }
-
-    return bars;
+    return bars[symbol];
   } catch (err) {
-    console.error("❌ Failed to fetch bars:", err.message);
-    return null;
+    throw new Error("Failed to fetch bars: " + err.message);
   }
 }
 
-function calculateEMAs(closes) {
-  const ema12 = EMA.calculate({ period: 12, values: closes });
-  const ema20 = EMA.calculate({ period: 20, values: closes });
 
-  return {
-    ema12: ema12[ema12.length - 1],
-    ema12Prev: ema12[ema12.length - 2],
-    ema20: ema20[ema20.length - 1],
-    ema20Prev: ema20[ema20.length - 2],
-  };
+async function getCurrentPosition() {
+  try {
+    const position = await alpaca.getPosition('BTC/USD');
+    return position.side; // 'long' or 'short'
+  } catch (err) {
+    return null; // No current position
+  }
+}
+
+async function closePosition() {
+  try {
+    await alpaca.closePosition('BTC/USD');
+    console.log('✅ Closed position.');
+  } catch (err) {
+    console.log('ℹ️ No position to close.');
+  }
 }
 
 async function placeOrder(side) {
   try {
     await alpaca.createOrder({
-      symbol: "BTC/USD",
-      qty: 0.0001,
-      side: side,
-      type: "market",
-      time_in_force: "gtc",
+      symbol: 'BTC/USD',
+      qty: 0.0001, // Adjust position size as needed
+      side,
+      type: 'market',
+      time_in_force: 'gtc',
     });
-    console.log(`✅ ${side.toUpperCase()} order placed`);
+    console.log(`📈 Placed ${side} order.`);
   } catch (err) {
-    console.error("❌ Order failed:", err.message);
+    console.error('❌ Order failed:', err.message);
   }
+}
+
+console.log("Fetched bars:", bars[SYMBOL]?.length);
+
+
+function calculateEMAs(closes) {
+  const ema12 = EMA.calculate({ period: 12, values: closes });
+  const ema20 = EMA.calculate({ period: 20, values: closes });
+
+  return { ema12, ema20 };
 }
 
 async function runStrategy() {
-  console.log("📈 Running EMA Strategy...");
+  console.log('📈 Running EMA Strategy...');
 
-  const bars = await fetchBars();
-  if (!bars) return;
+  const bars = await fetchBarData();
+  if (bars.length === 0) return;
 
-  const closes = bars.map((bar) => bar.c);
+  const closes = bars.map(bar => bar.close);
+  const { ema12, ema20 } = calculateEMAs(closes);
 
-  const { ema12, ema12Prev, ema20, ema20Prev } = calculateEMAs(closes);
+  const len = ema12.length;
+  const lastEma12 = ema12[len - 1];
+  const prevEma12 = ema12[len - 2];
+  const lastEma20 = ema20[len - 1];
+  const prevEma20 = ema20[len - 2];
 
-  if (
-    ema12 === undefined ||
-    ema20 === undefined ||
-    ema12Prev === undefined ||
-    ema20Prev === undefined
-  ) {
-    console.error("❌ EMA calculation failed");
-    return;
-  }
+  const position = await getCurrentPosition();
 
-  console.log(`EMA12: ${ema12.toFixed(2)} | EMA20: ${ema20.toFixed(2)}`);
+  const bullishCross = prevEma12 < prevEma20 && lastEma12 > lastEma20;
+  const bearishCross = prevEma12 > prevEma20 && lastEma12 < lastEma20;
 
-  // Buy Signal
-  if (ema12Prev < ema20Prev && ema12 > ema20 && lastSignal !== "buy") {
-    console.log("📘 Buy Signal Triggered");
-    await placeOrder("buy");
-    lastSignal = "buy";
-  }
-
-  // Sell Signal
-  else if (ema20Prev < ema12Prev && ema20 > ema12 && lastSignal !== "sell") {
-    console.log("📕 Sell Signal Triggered");
-    await placeOrder("sell");
-    lastSignal = "sell";
+  if (bullishCross && lastEma12 > lastEma20) {
+    if (position !== 'long') {
+      console.log('📊 Bullish crossover detected.');
+      await closePosition();
+      await placeOrder('buy');
+    } else {
+      console.log('📌 Already in long position.');
+    }
+  } else if (bearishCross && lastEma20 > lastEma12) {
+    if (position !== 'short') {
+      console.log('📉 Bearish crossover detected.');
+      await closePosition();
+      await placeOrder('sell');
+    } else {
+      console.log('📌 Already in short position.');
+    }
   } else {
-    console.log("🟡 No trade signal");
+    console.log('🔁 No crossover detected.');
   }
 }
 
-// Run every minute
 runStrategy();
-setInterval(runStrategy, 60 * 1000);
