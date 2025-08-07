@@ -1,0 +1,84 @@
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+dotenv.config();
+
+const API_KEY = process.env.ALPACA_API_KEY;
+const SECRET_KEY = process.env.ALPACA_SECRET_KEY;
+
+const headers = {
+  'APCA-API-KEY-ID': API_KEY,
+  'APCA-API-SECRET-KEY': SECRET_KEY,
+};
+
+// === EMA CALCULATION ===
+function calculateEMA(prices, period) {
+  const k = 2 / (period + 1);
+  let emaArray = [];
+  let ema = prices.slice(0, period).reduce((a, b) => a + b) / period;
+  emaArray[period - 1] = ema;
+
+  for (let i = period; i < prices.length; i++) {
+    ema = prices[i] * k + ema * (1 - k);
+    emaArray[i] = ema;
+  }
+
+  return emaArray;
+}
+
+// === GET LIVE PRICE ===
+async function fetchLivePrice() {
+  const url = 'https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols=BTC/USD';
+  const res = await fetch(url, { headers });
+  const data = await res.json();
+  return data.trades['BTC/USD'].p;
+}
+
+// === GET HISTORICAL CANDLES ===
+async function fetchCandles() {
+  var now = new Date();
+  var end = now.toISOString();
+  var start = new Date(now.getTime() - 30 * 5 * 60 * 1000).toISOString();
+
+  const url = `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=BTC/USD&timeframe=5Min&start=${start}&end=${end}&limit=30`;
+
+  const res = await fetch(url, { headers });
+  const data = await res.json();
+
+  const bars = data.bars['BTC/USD'];
+  if (!bars || bars.length < 20) {
+    throw new Error('Not enough candle data for EMA calculation.');
+  }
+
+  return bars.map(bar => bar.c); // extract close prices
+}
+
+// === MAIN FUNCTION ===
+async function main() {
+  try {
+    const livePrice = await fetchLivePrice();
+    const closes = await fetchCandles();
+
+    const ema12Arr = calculateEMA(closes, 12);
+    const ema20Arr = calculateEMA(closes, 20);
+
+    const latestEMA12 = ema12Arr[ema12Arr.length - 1];
+    const latestEMA20 = ema20Arr[ema20Arr.length - 1];
+
+    console.log(`\n💰 Live BTC/USD Price: $${livePrice}`);
+    console.log(`📈 EMA 12: $${latestEMA12.toFixed(2)}`);
+    console.log(`📉 EMA 20: $${latestEMA20.toFixed(2)}`);
+
+    if (latestEMA12 > latestEMA20) {
+      console.log("✅ Bullish crossover: EMA 12 is above EMA 20");
+    } else if (latestEMA12 < latestEMA20) {
+      console.log("❌ Bearish crossover: EMA 12 is below EMA 20");
+    } else {
+      console.log("⚖️ No crossover: EMA 12 equals EMA 20");
+    }
+
+  } catch (error) {
+    console.error("❌ Error:", error.message);
+  }
+}
+
+main();
