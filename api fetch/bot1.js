@@ -2,8 +2,6 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 dotenv.config();
 
-//many open orders possible a crazy spam every time we run it 
-
 const API_KEY = process.env.ALPACA_API_KEY;
 const SECRET_KEY = process.env.ALPACA_SECRET_KEY;
 
@@ -11,6 +9,10 @@ const headers = {
   'APCA-API-KEY-ID': API_KEY,
   'APCA-API-SECRET-KEY': SECRET_KEY,
 };
+
+// Track previous EMA state
+let previousEMARelation = null; // 'above', 'below', or null
+let isRunning = false;
 
 // === EMA CALCULATION ===
 function calculateEMA(prices, period) {
@@ -63,6 +65,22 @@ async function checkPosition() {
   return data;
 }
 
+// === CLOSE POSITION ===
+async function closePosition() {
+  try {
+    const res = await fetch('https://paper-api.alpaca.markets/v2/positions/BTC/USD', {
+      method: 'DELETE',
+      headers,
+    });
+    const data = await res.json();
+    console.log(`🔴 Position closed:`, data.id || data.message || data);
+    return true;
+  } catch (error) {
+    console.error("Error closing position:", error.message);
+    return false;
+  }
+}
+
 // === PLACE ORDER ===
 async function placeOrder(side, qty = 0.01) {
   const order = {
@@ -87,7 +105,10 @@ async function placeOrder(side, qty = 0.01) {
 }
 
 // === MAIN FUNCTION ===
-async function main() {
+async function checkEMAAndTrade() {
+  if (isRunning) return;
+  isRunning = true;
+
   try {
     const livePrice = await fetchLivePrice();
     const closes = await fetchCandles();
@@ -102,33 +123,53 @@ async function main() {
     console.log(`📈 EMA 12: $${latestEMA12.toFixed(2)}`);
     console.log(`📉 EMA 20: $${latestEMA20.toFixed(2)}`);
 
+    const currentEMARelation = 
+      latestEMA12 > latestEMA20 ? 'above' : 
+      latestEMA12 < latestEMA20 ? 'below' : 
+      'equal';
+
+    // Skip if EMA relation hasn't changed
+    if (currentEMARelation === previousEMARelation) {
+      console.log("🔄 EMA relation unchanged, skipping action");
+      return;
+    }
+
     const position = await checkPosition();
 
-    if (latestEMA12 > latestEMA20) {
+    if (currentEMARelation === 'above') {
       console.log("✅ Bullish crossover: EMA 12 is above EMA 20");
 
-      if (!position || parseFloat(position.qty) <= 0) {
-        await placeOrder('buy');
-      } else {
-        console.log("📦 Already in position, skipping buy.");
+      // Close any existing position first
+      if (position) {
+        await closePosition();
       }
 
-    } else if (latestEMA12 < latestEMA20) {
+      // Place buy order
+      await placeOrder('buy');
+      previousEMARelation = 'above';
+
+    } else if (currentEMARelation === 'below') {
       console.log("❌ Bearish crossover: EMA 12 is below EMA 20");
 
-      if (position && parseFloat(position.qty) > 0) {
-        await placeOrder('sell');
-      } else {
-        console.log("🧘 No open position, skipping sell.");
+      // Close any existing position first
+      if (position) {
+        await closePosition();
       }
 
-    } else {
-      console.log("⚖️ No crossover: EMA 12 equals EMA 20");
+      // Place sell order
+      await placeOrder('sell');
+      previousEMARelation = 'below';
     }
 
   } catch (error) {
     console.error("❌ Error:", error.message);
+  } finally {
+    isRunning = false;
   }
 }
 
-main();
+// Run immediately and then every 5 minutes
+checkEMAAndTrade();
+setInterval(checkEMAAndTrade, 5 * 60 * 1000);
+
+console.log("🚀 EMA Crossover Bot started. Checking every 5 minutes...");

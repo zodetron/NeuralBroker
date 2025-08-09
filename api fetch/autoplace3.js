@@ -2,8 +2,6 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 dotenv.config();
 
-//many open orders possible a crazy spam every time we run it 
-
 const API_KEY = process.env.ALPACA_API_KEY;
 const SECRET_KEY = process.env.ALPACA_SECRET_KEY;
 
@@ -51,42 +49,66 @@ async function fetchCandles() {
     throw new Error('Not enough candle data for EMA calculation.');
   }
 
-  return bars.map(bar => bar.c); // extract close prices
+  return bars.map(bar => bar.c); // close prices
 }
 
 // === CHECK OPEN POSITION ===
-async function checkPosition() {
-  const res = await fetch('https://paper-api.alpaca.markets/v2/positions/BTC/USD', { headers });
+async function getOpenPosition() {
+  const url = 'https://paper-api.alpaca.markets/v2/positions/BTC/USD';
+  const res = await fetch(url, { headers });
 
-  if (res.status === 404) return null; // No open position
+  if (res.status === 404) {
+    return null; // No position
+  }
+
   const data = await res.json();
-  return data;
+  return data.side; // 'long' or 'short'
+}
+
+// === CLOSE EXISTING POSITION ===
+async function closePosition() {
+  const url = 'https://paper-api.alpaca.markets/v2/positions/BTC/USD';
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers
+  });
+
+  if (!res.ok) {
+    throw new Error('Failed to close position.');
+  }
+
+  console.log('❌ Existing position closed.');
 }
 
 // === PLACE ORDER ===
-async function placeOrder(side, qty = 0.01) {
-  const order = {
+async function placeOrder(side) {
+  const url = 'https://paper-api.alpaca.markets/v2/orders';
+  const body = {
     symbol: 'BTC/USD',
-    qty: qty.toFixed(4),
-    side: side,
+    qty: 1,
+    side,
     type: 'market',
-    time_in_force: 'gtc',
+    time_in_force: 'gtc'
   };
 
-  const res = await fetch('https://paper-api.alpaca.markets/v2/orders', {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       ...headers,
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json'
     },
-    body: JSON.stringify(order),
+    body: JSON.stringify(body)
   });
 
-  const data = await res.json();
-  console.log(`📤 ${side.toUpperCase()} order placed:`, data.id || data.message || data);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(`Order failed: ${JSON.stringify(error)}`);
+  }
+
+  console.log(`✅ ${side.toUpperCase()} order placed successfully.`);
 }
 
-// === MAIN FUNCTION ===
+// === MAIN LOGIC ===
 async function main() {
   try {
     const livePrice = await fetchLivePrice();
@@ -98,36 +120,40 @@ async function main() {
     const latestEMA12 = ema12Arr[ema12Arr.length - 1];
     const latestEMA20 = ema20Arr[ema20Arr.length - 1];
 
-    console.log(`\n💰 Live BTC/USD Price: $${livePrice}`);
-    console.log(`📈 EMA 12: $${latestEMA12.toFixed(2)}`);
-    console.log(`📉 EMA 20: $${latestEMA20.toFixed(2)}`);
+    console.log(`\n💰 BTC/USD Price: $${livePrice}`);
+    console.log(`📈 EMA 12: ${latestEMA12.toFixed(2)} | 📉 EMA 20: ${latestEMA20.toFixed(2)}`);
 
-    const position = await checkPosition();
+    const currentPosition = await getOpenPosition();
+    console.log(`📊 Current Position: ${currentPosition || 'None'}`);
 
     if (latestEMA12 > latestEMA20) {
-      console.log("✅ Bullish crossover: EMA 12 is above EMA 20");
-
-      if (!position || parseFloat(position.qty) <= 0) {
+      console.log('📍 Signal: BUY');
+      if (currentPosition === 'short') {
+        await closePosition();
+        await placeOrder('buy');
+      } else if (!currentPosition) {
         await placeOrder('buy');
       } else {
-        console.log("📦 Already in position, skipping buy.");
+        console.log('📎 Holding BUY position. No action needed.');
       }
 
     } else if (latestEMA12 < latestEMA20) {
-      console.log("❌ Bearish crossover: EMA 12 is below EMA 20");
-
-      if (position && parseFloat(position.qty) > 0) {
+      console.log('📍 Signal: SELL');
+      if (currentPosition === 'long') {
+        await closePosition();
+        await placeOrder('sell');
+      } else if (!currentPosition) {
         await placeOrder('sell');
       } else {
-        console.log("🧘 No open position, skipping sell.");
+        console.log('📎 Holding SELL position. No action needed.');
       }
 
     } else {
-      console.log("⚖️ No crossover: EMA 12 equals EMA 20");
+      console.log('⚖️ EMAs are equal. No action taken.');
     }
 
   } catch (error) {
-    console.error("❌ Error:", error.message);
+    console.error('❌ Error:', error.message);
   }
 }
 
