@@ -190,3 +190,5 @@ setInterval(checkEMAAndTrade, 5 * 60 * 1000);
 setInterval(checkStopLoss, 15 * 1000);
 
 console.log("🚀 EMA + Volume Spike Bot started (1% SL, 5m EMA check, 15s SL monitor)...");
+
+//looping thorugh SL AND auto-check for spiking with volume transformations
