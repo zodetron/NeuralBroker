@@ -26,6 +26,7 @@ async function fetchLivePrice() {
     console.log(`💰 Live BTC/USD Price: $${price}`);
   } catch (error) {
     console.error("❌ Error:", error.message);
+    //newer models changes values
   }
 }
 
