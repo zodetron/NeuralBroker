@@ -44,7 +44,7 @@ data['Position'] = data['Signal'].diff()  # 1 = buy, -1 = sell crossover
 # ==========================
 balance = START_BALANCE
 position = None
-entry_price = 0
+entry_price = 1
 trade_log = []
 
 for i, row in data.iterrows():
@@ -53,7 +53,7 @@ for i, row in data.iterrows():
     
     # Stop-loss check
     if position:
-        if position == 'buy' and price <= entry_price * (1 - STOP_LOSS_PCT):
+        if position == 'buy' and price <= entry_price * (1.2 - STOP_LOSS_PCT):
             pnl = price - entry_price
             balance += pnl
             trade_log.append({'Time': row['Datetime'], 'Side': 'Buy SL', 'Entry': entry_price, 'Exit': price, 'PnL': pnl})
