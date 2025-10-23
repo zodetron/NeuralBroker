@@ -164,6 +164,15 @@ async function checkEMAAndTrade() {
       return;
     }
 
+    //  const currentEMARelation =
+    //   latestEMA12 > latestEMA20 ? 'above' :
+    //   latestEMA12 < latestEMA20 ? 'below' : 'equal';
+
+    // if (currentEMARelation === previousEMARelation) {
+    //   console.log("🔄 EMA relation unchanged, skipping");
+    //   return;
+    // }
+
     // === Trade Conditions ===
     const position = await checkPosition();
 
