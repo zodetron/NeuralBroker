@@ -10,6 +10,19 @@ const headers = {
   'APCA-API-SECRET-KEY': SECRET_KEY,
 };
 
+// function calculateEMA(prices, period) {
+//   const k = 2 / (period + 1);
+//   let emaArray = [];
+//   let ema = prices.slice(0, period).reduce((a, b) => a + b) / period;
+//   emaArray[period - 1] = ema;
+
+//   for (let i = period; i < prices.length; i++) {
+//     ema = prices[i] * k + ema * (1 - k);
+//     emaArray[i] = ema;
+//   }
+
+//   return emaArray;
+// }
 // Track previous EMA state
 let previousEMARelation = null; // 'above', 'below', or null
 let isRunning = false;
