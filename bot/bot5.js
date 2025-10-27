@@ -1,5 +1,4 @@
-// === EMA + Volume Spike + Higher Timeframe EMA Bot with TP & Trailing SL ===
-// trailing bigger sl in a favourable move
+// === EMA + Volume Spike + Higher TF EMA + TP/Trailing SL Bot (Safe Fetch) ===
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -33,11 +32,24 @@ function calculateEMA(prices, period) {
   return emaArray;
 }
 
+// === SAFE FETCH FUNCTION ===
+async function safeFetchJSON(url) {
+  const res = await fetch(url, { headers });
+  const contentType = res.headers.get('content-type');
+
+  if (!contentType || !contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Invalid JSON response: ${text}`);
+  }
+
+  return await res.json();
+}
+
 // === GET LIVE PRICE ===
 async function fetchLivePrice() {
   const url = 'https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols=BTC/USD';
-  const res = await fetch(url, { headers });
-  const data = await res.json();
+  const data = await safeFetchJSON(url);
+  if (!data.trades || !data.trades['BTC/USD']) throw new Error('No trade data received.');
   return data.trades['BTC/USD'].p;
 }
 
@@ -48,8 +60,7 @@ async function fetchCandles(timeframe = '5Min', limit = 50) {
   const start = new Date(now.getTime() - limit * 5 * 60 * 1000).toISOString();
 
   const url = `https://data.alpaca.markets/v1beta3/crypto/us/bars?symbols=BTC/USD&timeframe=${timeframe}&start=${start}&end=${end}&limit=${limit}`;
-  const res = await fetch(url, { headers });
-  const data = await res.json();
+  const data = await safeFetchJSON(url);
 
   const bars = data.bars['BTC/USD'];
   if (!bars || bars.length < 20) throw new Error('Not enough candle data for EMA calculation.');
@@ -62,10 +73,14 @@ async function fetchCandles(timeframe = '5Min', limit = 50) {
 
 // === POSITION / ORDER FUNCTIONS ===
 async function checkPosition() {
-  const res = await fetch('https://paper-api.alpaca.markets/v2/positions/BTCUSD', { headers });
-  if (res.status === 404) return null;
-  try { return await res.json(); }
-  catch { return null; }
+  const url = 'https://paper-api.alpaca.markets/v2/positions/BTCUSD';
+  try {
+    const data = await safeFetchJSON(url);
+    return data;
+  } catch (err) {
+    if (err.message.includes('404')) return null;
+    throw err;
+  }
 }
 
 async function closePosition() {
@@ -74,14 +89,24 @@ async function closePosition() {
       method: 'DELETE',
       headers,
     });
-    if (res.status === 404) return false;
-    const data = await res.json();
+
+    const contentType = res.headers.get('content-type');
+    let data;
+    if (contentType && contentType.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      console.log("Response not JSON on closePosition:", text);
+      data = text;
+    }
+
     console.log(`🔴 Position closed:`, data.id || data.message || data);
     entryPrice = null;
     entrySide = null;
     stopLoss = null;
     takeProfit = null;
     return true;
+
   } catch (error) {
     console.error("Error closing position:", error.message);
     return false;
@@ -96,19 +121,35 @@ async function placeOrder(side, qty = 0.01) {
     type: 'market',
     time_in_force: 'gtc',
   };
-  const res = await fetch('https://paper-api.alpaca.markets/v2/orders', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify(order),
-  });
-  const data = await res.json();
-  console.log(`📤 ${side.toUpperCase()} order placed:`, data.id || data.message || data);
 
-  entryPrice = await fetchLivePrice();
-  entrySide = side;
-  stopLoss = side === 'buy' ? entryPrice * 0.99 : entryPrice * 1.01;
-  takeProfit = side === 'buy' ? entryPrice * 1.02 : entryPrice * 0.98;
-  console.log(`🔒 SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`);
+  try {
+    const res = await fetch('https://paper-api.alpaca.markets/v2/orders', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(order),
+    });
+
+    const contentType = res.headers.get('content-type');
+    let data;
+    if (contentType && contentType.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const text = await res.text();
+      console.log("Response not JSON on placeOrder:", text);
+      data = text;
+    }
+
+    console.log(`📤 ${side.toUpperCase()} order placed:`, data.id || data.message || data);
+
+    entryPrice = await fetchLivePrice();
+    entrySide = side;
+    stopLoss = side === 'buy' ? entryPrice * 0.99 : entryPrice * 1.01;
+    takeProfit = side === 'buy' ? entryPrice * 1.02 : entryPrice * 0.98;
+    console.log(`🔒 SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`);
+
+  } catch (err) {
+    console.error("Order placement error:", err.message);
+  }
 }
 
 // === STOP LOSS & TAKE PROFIT CHECK ===
@@ -119,17 +160,8 @@ async function checkStopLossAndTP() {
     const livePrice = await fetchLivePrice();
 
     if (entrySide === 'buy') {
-      // Stop Loss hit
-      if (livePrice <= stopLoss) {
-        console.log(`🛑 SL hit LONG. Price: ${livePrice}, Entry: ${entryPrice}`);
-        await closePosition();
-      }
-      // Take Profit hit
-      else if (livePrice >= takeProfit) {
-        console.log(`🎯 TP hit LONG. Price: ${livePrice}, Entry: ${entryPrice}`);
-        await closePosition();
-      }
-      // Trailing Stop: move SL up if price moves 1% in favor
+      if (livePrice <= stopLoss) await closePosition();
+      else if (livePrice >= takeProfit) await closePosition();
       else if (livePrice >= entryPrice * 1.01 && livePrice * 0.99 > stopLoss) {
         stopLoss = livePrice * 0.99;
         console.log(`🔄 Trailing SL updated LONG: ${stopLoss.toFixed(2)}`);
@@ -137,14 +169,8 @@ async function checkStopLossAndTP() {
     }
 
     if (entrySide === 'sell') {
-      if (livePrice >= stopLoss) {
-        console.log(`🛑 SL hit SHORT. Price: ${livePrice}, Entry: ${entryPrice}`);
-        await closePosition();
-      }
-      else if (livePrice <= takeProfit) {
-        console.log(`🎯 TP hit SHORT. Price: ${livePrice}, Entry: ${entryPrice}`);
-        await closePosition();
-      }
+      if (livePrice >= stopLoss) await closePosition();
+      else if (livePrice <= takeProfit) await closePosition();
       else if (livePrice <= entryPrice * 0.99 && livePrice * 1.01 < stopLoss) {
         stopLoss = livePrice * 1.01;
         console.log(`🔄 Trailing SL updated SHORT: ${stopLoss.toFixed(2)}`);
@@ -162,6 +188,7 @@ async function checkEMAAndTrade() {
   isRunning = true;
 
   try {
+    
     const livePrice = await fetchLivePrice();
     const bars5m = await fetchCandles('5Min', 50);
     const bars15m = await fetchCandles('15Min', 50);
@@ -170,16 +197,15 @@ async function checkEMAAndTrade() {
     const volumes5m = bars5m.map(b => b.volume);
     const closes15m = bars15m.map(b => b.close);
 
-    // EMAs
-    const ema12Arr = calculateEMA(closes5m, 12);
-    const ema20Arr = calculateEMA(closes5m, 20);
-    const ema50HTFArr = calculateEMA(closes15m, 50);
+    const ema12Arr = calculateEMA(closes5m, 100);
+    const ema20Arr = calculateEMA(closes5m, 100);
+    const ema50HTFArr = calculateEMA(closes15m, 100);
+
 
     const latestEMA12 = ema12Arr.at(-1);
     const latestEMA20 = ema20Arr.at(-1);
     const latestEMA50 = ema50HTFArr.at(-1);
 
-    // Volume Spike
     const avgVolume = volumes5m.slice(-11, -1).reduce((a, b) => a + b) / 10;
     const latestVolume = volumes5m.at(-1);
     const volumeRatio = latestVolume / avgVolume;
