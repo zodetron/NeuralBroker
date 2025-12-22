@@ -1,4 +1,4 @@
-﻿#NeuralBroker
+﻿# NeuralBroker
 
 **NeuralBroker** is an intelligent auto-trading bot built for **BTC/USD** that executes entries and exits based on **EMA crossover** and **volume spike confirmation**.  
 It combines technical precision with adaptive logic to make smarter trading decisions — fully automated and backtest-ready.
@@ -45,6 +45,7 @@ It combines technical precision with adaptive logic to make smarter trading deci
 ```bash
 # Clone the repository
 git clone https://github.com/<your-user
+
 
 
 
