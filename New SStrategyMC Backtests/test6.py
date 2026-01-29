@@ -1,3 +1,7 @@
+# Add a volatility filter
+
+# trade only when Current ATR > median ATR of recent bars
+
 import pandas as pd
 import numpy as np
 from datetime import timedelta, time
@@ -9,12 +13,12 @@ LOT_SIZE = 0.05
 
 TP1_R = 1.0
 TP2_R = 2.0
-PARTIAL_SIZE = 0.5
+PARTIAL_SIZE = 0.33
 
 ATR_SL_MULT = 1.5
 
 # 🔒 DAILY RISK CONTROLS
-MAX_DAILY_LOSS_R = 1.0      # stop trading after -1R in a day
+MAX_DAILY_LOSS_R = 1.0
 MAX_TRADES_PER_DAY = 2
 
 HTF_LOOKBACK = 48
@@ -64,6 +68,10 @@ df["liq_short"] = df["liq_high"].rolling(EVENT_STATE_BARS).max().astype(bool)
 # ================= ATR =================
 df["atr"] = (df["high"] - df["low"]).rolling(ATR_PERIOD).mean()
 
+# ================= 🔥 VOLATILITY FILTER (NEW) =================
+df["atr_median"] = df["atr"].rolling(50).median()
+df["vol_ok"] = df["atr"] > df["atr_median"]
+
 # ================= DISPLACEMENT + FVG =================
 df["bull_disp"] = (df["close"] > df["open"]) & ((df["close"] - df["open"]) > df["atr"])
 df["bear_disp"] = (df["open"] > df["close"]) & ((df["open"] - df["close"]) > df["atr"])
@@ -85,14 +93,16 @@ df["bear_mss"] = (df["close"] < df["swing_low"].shift(1)).rolling(EVENT_STATE_BA
 df["discount"] = df["close"] < df["equilibrium"]
 df["premium"] = df["close"] > df["equilibrium"]
 
-# ================= ENTRY SIGNALS =================
+# ================= ENTRY SIGNALS (WITH VOL FILTER) =================
 df["long_signal"] = (
-    df["in_ny"] & df["bull_bias"] & df["liq_long"] &
+    df["in_ny"] & df["vol_ok"] &
+    df["bull_bias"] & df["liq_long"] &
     df["fvg_long"] & df["bull_mss"] & df["discount"]
 )
 
 df["short_signal"] = (
-    df["in_ny"] & df["bear_bias"] & df["liq_short"] &
+    df["in_ny"] & df["vol_ok"] &
+    df["bear_bias"] & df["liq_short"] &
     df["fvg_short"] & df["bear_mss"] & df["premium"]
 )
 
@@ -110,17 +120,15 @@ for timestamp, row in df.iterrows():
 
     day = timestamp.date()
 
-    # Reset daily limits
     if day != current_day:
         current_day = day
         daily_pnl = 0.0
         daily_trades = 0
 
-    # Enforce daily limits
     if daily_pnl <= -MAX_DAILY_LOSS_R or daily_trades >= MAX_TRADES_PER_DAY:
         continue
 
-    # ================= ENTRY =================
+    # ===== ENTRY =====
     if position is None:
         if row["long_signal"]:
             position = "LONG"
@@ -140,7 +148,7 @@ for timestamp, row in df.iterrows():
             size_remaining = LOT_SIZE
             daily_trades += 1
 
-    # ================= MANAGEMENT =================
+    # ===== MANAGEMENT =====
     else:
         if position == "LONG":
             if row["low"] <= sl:
@@ -154,7 +162,7 @@ for timestamp, row in df.iterrows():
                 trades.append(pnl)
                 daily_pnl += pnl
                 size_remaining *= (1 - PARTIAL_SIZE)
-                sl = entry  # BE
+                sl = entry
 
             elif row["high"] >= tp2:
                 pnl = (tp2 - entry) * size_remaining
@@ -192,7 +200,7 @@ losses = trades[trades < 0]
 equity_peak = np.maximum.accumulate(equity)
 drawdown = equity - equity_peak
 
-print("\n===== FINAL ICT SYSTEM RESULTS =====")
+print("\n===== FINAL ICT SYSTEM + VOL FILTER =====")
 print("Total Trades:", len(trades))
 print("Win Rate:", round(len(wins) / len(trades) * 100, 2) if len(trades) else 0, "%")
 print("Net PnL:", round(trades.sum(), 2))
@@ -207,7 +215,7 @@ plt.figure(figsize=(12, 6))
 plt.plot(equity, label="Equity Curve")
 plt.fill_between(range(len(drawdown)), drawdown, color="red", alpha=0.3, label="Drawdown")
 plt.axhline(0, color="black", linewidth=0.8)
-plt.title("BTCUSD ICT Strategy – Equity Curve & Drawdown")
+plt.title("BTCUSD ICT Strategy – Equity Curve & Drawdown (Vol Filter)")
 plt.xlabel("Trade Number")
 plt.ylabel("PnL")
 plt.legend()
