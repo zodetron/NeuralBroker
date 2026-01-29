@@ -1,3 +1,5 @@
+# Add daily max loss / trade limit
+
 # ICT + NY + ATR SL + PARTIAL TP + BE
 
 import pandas as pd
@@ -97,8 +99,27 @@ position = None
 entry = sl = tp1 = tp2 = 0.0
 size_remaining = 0.0
 trades = []
+current_day = None
+daily_pnl = 0.0
+daily_trades = 0
 
-for _, row in df.iterrows():
+MAX_DAILY_LOSS_R = 1.0      # stop trading after -1R in a day
+MAX_TRADES_PER_DAY = 2     # max 2 trades per day
+
+
+for timestamp, row in df.iterrows():
+
+    day = timestamp.date()
+
+    # Reset counters at new day
+    if day != current_day:
+        current_day = day
+        daily_pnl = 0.0
+        daily_trades = 0
+
+    # Block trading if daily limits hit
+    if daily_pnl <= -MAX_DAILY_LOSS_R or daily_trades >= MAX_TRADES_PER_DAY:
+        continue
 
     if position is None:
         if row["long_signal"]:
@@ -108,6 +129,7 @@ for _, row in df.iterrows():
             tp1 = entry + (entry - sl) * TP1_R
             tp2 = entry + (entry - sl) * TP2_R
             size_remaining = LOT_SIZE
+            daily_trades += 1
 
         elif row["short_signal"]:
             position = "SHORT"
@@ -116,35 +138,49 @@ for _, row in df.iterrows():
             tp1 = entry - (sl - entry) * TP1_R
             tp2 = entry - (sl - entry) * TP2_R
             size_remaining = LOT_SIZE
+            daily_trades += 1
 
     else:
         if position == "LONG":
             if row["low"] <= sl:
-                trades.append((sl - entry) * size_remaining)
+                pnl = (sl - entry) * size_remaining
+                trades.append(pnl)
+                daily_pnl += pnl
                 position = None
 
             elif row["high"] >= tp1 and size_remaining == LOT_SIZE:
-                trades.append((tp1 - entry) * (LOT_SIZE * PARTIAL_SIZE))
+                pnl = (tp1 - entry) * (LOT_SIZE * PARTIAL_SIZE)
+                trades.append(pnl)
+                daily_pnl += pnl
                 size_remaining *= (1 - PARTIAL_SIZE)
                 sl = entry  # BE
 
             elif row["high"] >= tp2:
-                trades.append((tp2 - entry) * size_remaining)
+                pnl = (tp2 - entry) * size_remaining
+                trades.append(pnl)
+                daily_pnl += pnl
                 position = None
 
         elif position == "SHORT":
             if row["high"] >= sl:
-                trades.append((entry - sl) * size_remaining)
+                pnl = (entry - sl) * size_remaining
+                trades.append(pnl)
+                daily_pnl += pnl
                 position = None
 
             elif row["low"] <= tp1 and size_remaining == LOT_SIZE:
-                trades.append((entry - tp1) * (LOT_SIZE * PARTIAL_SIZE))
+                pnl = (entry - tp1) * (LOT_SIZE * PARTIAL_SIZE)
+                trades.append(pnl)
+                daily_pnl += pnl
                 size_remaining *= (1 - PARTIAL_SIZE)
                 sl = entry
 
             elif row["low"] <= tp2:
-                trades.append((entry - tp2) * size_remaining)
+                pnl = (entry - tp2) * size_remaining
+                trades.append(pnl)
+                daily_pnl += pnl
                 position = None
+
 
 # ================= RESULTS =================
 trades = np.array(trades)
