@@ -12,13 +12,11 @@ SIGNAL: Original M0 — MACD histogram flip + EMA200 trend filter
 Capital: $100 | Leverage: 1:1000 | Risk: 1%/trade | RR: 2:1 | SL: 0.20%
 """
 
-import requests
 import pandas as pd
 import numpy as np
 import warnings
-import time
-from datetime import datetime, timedelta, timezone
 warnings.filterwarnings("ignore")
+from data_loader import load_data
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -28,58 +26,12 @@ LEVERAGE = 1000
 RISK_PCT = 0.01
 RR       = 2.0
 SL_PCT   = 0.0020
-SYMBOL   = "BTCUSDT"
-DAYS     = 1095   # 3 years
 
 # ─────────────────────────────────────────────
-# FETCH DATA
+# LOAD DATA — from CSV (instant) or Binance (first run)
 # ─────────────────────────────────────────────
-def fetch_binance(symbol, days):
-    print(f"📥 Fetching {symbol} 5m data ({days} days) from Binance...")
-    end_ms        = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms      = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-    url           = "https://api.binance.com/api/v3/klines"
-    all_candles   = []
-    current_start = start_ms
-
-    while current_start < end_ms:
-        params = {"symbol": symbol, "interval": "5m",
-                  "startTime": current_start, "endTime": end_ms, "limit": 1000}
-        try:
-            resp    = requests.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-            candles = resp.json()
-        except Exception as e:
-            print(f"  ⚠ {e} — retrying...")
-            time.sleep(2)
-            continue
-        if not candles:
-            break
-        all_candles.extend(candles)
-        last_ts = candles[-1][0]
-        pct     = (last_ts - start_ms) / (end_ms - start_ms) * 100
-        print(f"  fetched {len(all_candles):,} candles... {pct:.0f}%", end="\r")
-        if len(candles) < 1000:
-            break
-        current_start = last_ts + 1
-        time.sleep(0.05)
-
-    print()
-    cols = ["open_time","Open","High","Low","Close","Volume",
-            "ct","qv","t","tbb","tbq","ig"]
-    df = pd.DataFrame(all_candles, columns=cols)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df.set_index("open_time", inplace=True)
-    for c in ["Open","High","Low","Close","Volume"]:
-        df[c] = df[c].astype(float)
-    df = df[["Open","High","Low","Close","Volume"]]
-    df = df[~df.index.duplicated(keep="first")]
-    df.sort_index(inplace=True)
-    df.dropna(inplace=True)
-    return df
-
-df = fetch_binance(SYMBOL, DAYS)
-print(f"✅ {len(df):,} candles | {df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}\n")
+df = load_data()
+print()
 
 # ─────────────────────────────────────────────
 # INDICATORS
@@ -231,7 +183,7 @@ print("=" * 80)
 print("   BTC/USDT 5m — MACD ZERO-CROSS | 1-YEAR COMPOUNDING TEST")
 print(f"   Data: Binance  |  Capital: ${CAPITAL}  |  Leverage: 1:{LEVERAGE}")
 print(f"   Risk: {RISK_PCT*100}%/trade  |  RR: {RR}:1  |  SL: {SL_PCT*100}%")
-print(f"   Period: {df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}")
+print(f"   Period: {df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}  |  3 Years")
 print("=" * 80)
 print(f"  Total Trades    : {len(trades):,}")
 print(f"  Wins / Losses   : {wins} / {losses}")
@@ -295,7 +247,7 @@ print(f"{'─'*80}")
 print(trades[["entry_time","exit_time","direction","entry","exit","result","pnl","capital"]].tail(20).to_string(index=False))
 
 print("\n" + "=" * 80)
-print(f"  🏆  MACD Zero-Cross | 5m | 1 Year | Binance Data")
+print(f"  🏆  MACD Zero-Cross | 5m | 3 Years | Binance Data")
 print(f"      $100  →  ${round(final, 2)}  ({ret:.1f}% return)")
 print(f"      Win Rate: {wr:.1f}%  |  Max DD: {max_dd:.1f}%  |  {len(trades):,} trades")
 print(f"      Expectancy: ${round(exp, 4)}/trade")
@@ -308,6 +260,6 @@ print(f"      To reduce DD: trade only when 1H trend is strong (manual filter)."
 print("=" * 80)
 
 # Save
-trades.drop(columns=["month"]).to_csv("macd_5m_1year_trades.csv", index=False)
-print(f"\n📄 Full trade log → macd_5m_1year_trades.csv")
+trades.drop(columns=["month"]).to_csv("macd_5m_3year_trades.csv", index=False)
+print(f"\n📄 Full trade log → macd_5m_3year_trades.csv")
 print("✅ Done!\n")
