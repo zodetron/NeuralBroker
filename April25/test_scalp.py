@@ -1,0 +1,352 @@
+"""
+BTC/USD SCALPING BACKTEST — 5 Minute Timeframe
+Capital: $100 | Leverage: 1:1000 | Last 60 days
+4 Scalping Strategies:
+  1. EMA Scalp       — 9/21 EMA cross + volume spike
+  2. RSI + VWAP      — RSI bounce near VWAP
+  3. Breakout Scalp  — 20-bar high/low breakout + momentum
+  4. MACD Scalp      — MACD zero-cross + EMA trend
+
+yfinance limits:
+  1m  → last 7 days only
+  5m  → last 60 days  ← we use this (best balance of data vs granularity)
+"""
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import warnings
+from datetime import datetime, timedelta
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────────
+# CONFIG — tweak these to optimise
+# ─────────────────────────────────────────────
+STARTING_CAPITAL = 100.0
+LEVERAGE         = 1000
+RISK_PCT         = 0.01        # 1% of capital risked per trade
+RR               = 2.0         # 2:1 reward:risk
+TICKER           = "BTC-USD"
+
+# Choose timeframe: "1m" (7 days) or "5m" (60 days)
+INTERVAL         = "5m"
+LOOKBACK_DAYS    = 58 if INTERVAL == "5m" else 6
+
+# ─────────────────────────────────────────────
+# FETCH DATA
+# ─────────────────────────────────────────────
+print(f"📥 Fetching BTC/USD {INTERVAL} data...")
+end_date   = datetime.today()
+start_date = end_date - timedelta(days=LOOKBACK_DAYS)
+
+chunks, chunk_start = [], start_date
+step = timedelta(days=7 if INTERVAL == "1m" else 29)
+
+while chunk_start < end_date:
+    chunk_end = min(chunk_start + step, end_date)
+    try:
+        chunk = yf.download(
+            TICKER,
+            start=chunk_start.strftime("%Y-%m-%d"),
+            end=chunk_end.strftime("%Y-%m-%d"),
+            interval=INTERVAL,
+            auto_adjust=True,
+            progress=False
+        )
+        if len(chunk) > 0:
+            chunks.append(chunk)
+    except Exception as e:
+        print(f"  ⚠ chunk error: {e}")
+    chunk_start = chunk_end
+
+df = pd.concat(chunks)
+df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+df = df[~df.index.duplicated(keep="first")]
+df.sort_index(inplace=True)
+df.dropna(inplace=True)
+
+print(f"✅ {len(df)} candles | {df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}\n")
+
+# ─────────────────────────────────────────────
+# INDICATORS
+# ─────────────────────────────────────────────
+def add_indicators(df):
+    d = df.copy()
+
+    # EMAs
+    d["ema9"]  = d["Close"].ewm(span=9,   adjust=False).mean()
+    d["ema21"] = d["Close"].ewm(span=21,  adjust=False).mean()
+    d["ema50"] = d["Close"].ewm(span=50,  adjust=False).mean()
+    d["ema200"]= d["Close"].ewm(span=200, adjust=False).mean()
+
+    # RSI (7-period for scalping — faster)
+    delta      = d["Close"].diff()
+    gain       = delta.clip(lower=0).rolling(7).mean()
+    loss       = (-delta.clip(upper=0)).rolling(7).mean()
+    d["rsi"]   = 100 - (100 / (1 + gain / loss))
+
+    # MACD
+    ema12        = d["Close"].ewm(span=12, adjust=False).mean()
+    ema26        = d["Close"].ewm(span=26, adjust=False).mean()
+    d["macd"]    = ema12 - ema26
+    d["macd_sig"]= d["macd"].ewm(span=9, adjust=False).mean()
+    d["macd_hist"]= d["macd"] - d["macd_sig"]
+
+    # Bollinger Bands
+    d["bb_mid"]  = d["Close"].rolling(20).mean()
+    bb_std       = d["Close"].rolling(20).std()
+    d["bb_upper"]= d["bb_mid"] + 2 * bb_std
+    d["bb_lower"]= d["bb_mid"] - 2 * bb_std
+
+    # VWAP (reset each day)
+    d["date"] = d.index.date
+    d["cum_vol"]    = d.groupby("date")["Volume"].cumsum()
+    d["cum_vwap"]   = d.groupby("date").apply(
+        lambda x: (x["Close"] * x["Volume"]).cumsum()
+    ).reset_index(level=0, drop=True)
+    d["vwap"] = d["cum_vwap"] / d["cum_vol"]
+
+    # ATR (14-period)
+    hl  = d["High"] - d["Low"]
+    hc  = (d["High"] - d["Close"].shift()).abs()
+    lc  = (d["Low"]  - d["Close"].shift()).abs()
+    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    d["atr"] = tr.rolling(14).mean()
+
+    # Volume spike (volume > 1.5x 20-bar avg)
+    d["vol_avg"]   = d["Volume"].rolling(20).mean()
+    d["vol_spike"] = d["Volume"] > d["vol_avg"] * 1.5
+
+    # 20-bar high/low for breakout
+    d["high20"] = d["High"].rolling(20).max().shift(1)
+    d["low20"]  = d["Low"].rolling(20).min().shift(1)
+
+    return d
+
+df = add_indicators(df)
+df.dropna(inplace=True)
+print(f"  Indicators added. {len(df)} candles after warmup.\n")
+
+# ─────────────────────────────────────────────
+# BACKTEST ENGINE
+# ─────────────────────────────────────────────
+def backtest(df, signal_func, name, sl_pct, rr=RR):
+    tp_pct   = sl_pct * rr
+    capital  = STARTING_CAPITAL
+    position = None
+    trades   = []
+    entry_price = sl_price = tp_price = risk_usd = 0.0
+    entry_time = None
+
+    signals = signal_func(df)
+
+    for i in range(1, len(df)):
+        if capital <= 0:
+            break
+
+        price = float(df["Close"].iloc[i])
+        ts    = df.index[i]
+        sig   = int(signals.iloc[i])
+
+        # Manage open position
+        if position is not None:
+            hit_tp = (position == "long"  and price >= tp_price) or \
+                     (position == "short" and price <= tp_price)
+            hit_sl = (position == "long"  and price <= sl_price) or \
+                     (position == "short" and price >= sl_price)
+
+            if hit_tp or hit_sl:
+                pnl     = risk_usd * rr if hit_tp else -risk_usd
+                capital = max(0.0, capital + pnl)
+                trades.append({
+                    "strategy":    name,
+                    "entry_time":  entry_time,
+                    "exit_time":   ts,
+                    "direction":   position,
+                    "entry":       round(entry_price, 2),
+                    "exit":        round(price, 2),
+                    "result":      "TP ✅" if hit_tp else "SL ❌",
+                    "pnl":         round(pnl, 4),
+                    "capital":     round(capital, 4),
+                })
+                position = None
+                continue
+
+        # Open new position
+        if position is None and sig != 0 and capital > 0:
+            risk_usd    = round(capital * RISK_PCT, 6)
+            entry_price = price
+            entry_time  = ts
+            if sig == 1:
+                position = "long"
+                sl_price = entry_price * (1 - sl_pct)
+                tp_price = entry_price * (1 + tp_pct)
+            else:
+                position = "short"
+                sl_price = entry_price * (1 + sl_pct)
+                tp_price = entry_price * (1 - tp_pct)
+
+    return pd.DataFrame(trades)
+
+# ─────────────────────────────────────────────
+# SCALPING SIGNAL FUNCTIONS
+# ─────────────────────────────────────────────
+
+# ── S1: EMA 9/21 Crossover + Volume Spike ──
+# Fast EMA cross with volume confirmation — classic scalp
+def sig_ema_scalp(df):
+    s = pd.Series(0, index=df.index)
+    cross_up   = (df["ema9"] > df["ema21"]) & (df["ema9"].shift(1) <= df["ema21"].shift(1))
+    cross_down = (df["ema9"] < df["ema21"]) & (df["ema9"].shift(1) >= df["ema21"].shift(1))
+    # Only take cross signals when volume spikes (real momentum)
+    s[cross_up   & df["vol_spike"] & (df["Close"] > df["ema50"])] = 1
+    s[cross_down & df["vol_spike"] & (df["Close"] < df["ema50"])] = -1
+    return s
+
+# ── S2: RSI Bounce off VWAP ──
+# RSI oversold/overbought near VWAP — mean reversion scalp
+def sig_rsi_vwap(df):
+    s = pd.Series(0, index=df.index)
+    near_vwap = (df["Close"] - df["vwap"]).abs() / df["vwap"] < 0.002  # within 0.2% of VWAP
+
+    # RSI bounce up from oversold near VWAP
+    rsi_up   = (df["rsi"] > 30) & (df["rsi"].shift(1) <= 30)
+    # RSI drop from overbought near VWAP
+    rsi_down = (df["rsi"] < 70) & (df["rsi"].shift(1) >= 70)
+
+    s[rsi_up   & (df["Close"] >= df["vwap"] * 0.998)] = 1
+    s[rsi_down & (df["Close"] <= df["vwap"] * 1.002)] = -1
+    return s
+
+# ── S3: 20-Bar High/Low Breakout + Momentum ──
+# Price breaks 20-candle high/low with bullish/bearish momentum
+def sig_breakout_scalp(df):
+    s = pd.Series(0, index=df.index)
+    break_up   = (df["Close"] > df["high20"]) & (df["macd_hist"] > 0) & df["vol_spike"]
+    break_down = (df["Close"] < df["low20"])  & (df["macd_hist"] < 0) & df["vol_spike"]
+    s[break_up]   = 1
+    s[break_down] = -1
+    return s
+
+# ── S4: MACD Zero-Cross + EMA200 Trend ──
+# MACD histogram crosses zero with strong trend — momentum scalp
+def sig_macd_scalp(df):
+    s = pd.Series(0, index=df.index)
+    # MACD histogram flips positive (bullish momentum) in uptrend
+    hist_up   = (df["macd_hist"] > 0) & (df["macd_hist"].shift(1) <= 0) & (df["Close"] > df["ema200"])
+    # MACD histogram flips negative (bearish momentum) in downtrend
+    hist_down = (df["macd_hist"] < 0) & (df["macd_hist"].shift(1) >= 0) & (df["Close"] < df["ema200"])
+    s[hist_up]   = 1
+    s[hist_down] = -1
+    return s
+
+# ─────────────────────────────────────────────
+# RUN ALL STRATEGIES
+# ─────────────────────────────────────────────
+# SL is tighter for scalping — 0.15% to 0.25% price move
+strategies = [
+    ("S1. EMA 9/21 + Volume",   sig_ema_scalp,      0.0020),
+    ("S2. RSI Bounce + VWAP",   sig_rsi_vwap,       0.0015),
+    ("S3. Breakout + Momentum", sig_breakout_scalp,  0.0020),
+    ("S4. MACD Zero-Cross",     sig_macd_scalp,      0.0020),
+]
+
+all_trades = []
+summary    = []
+
+for name, sig_fn, sl in strategies:
+    trades = backtest(df, sig_fn, name, sl_pct=sl)
+    all_trades.append(trades)
+
+    if len(trades) == 0:
+        summary.append({
+            "Strategy":      name,
+            "Trades":        0,
+            "Wins":          0,
+            "Losses":        0,
+            "Win%":          "0%",
+            "PnL ($)":       0.0,
+            "Capital ($)":   STARTING_CAPITAL,
+            "Return%":       "0%",
+            "MaxDD%":        "0%",
+            "Avg Win":       0.0,
+            "Avg Loss":      0.0,
+        })
+        continue
+
+    wins     = (trades["result"].str.startswith("TP")).sum()
+    losses   = (trades["result"].str.startswith("SL")).sum()
+    pnl      = trades["pnl"].sum()
+    final    = trades["capital"].iloc[-1]
+    wr       = wins / len(trades) * 100
+    ret      = (final - STARTING_CAPITAL) / STARTING_CAPITAL * 100
+    avg_win  = trades.loc[trades["result"].str.startswith("TP"), "pnl"].mean() if wins  > 0 else 0
+    avg_loss = trades.loc[trades["result"].str.startswith("SL"), "pnl"].mean() if losses > 0 else 0
+
+    cap_s   = pd.concat([pd.Series([STARTING_CAPITAL]), trades["capital"].reset_index(drop=True)])
+    max_dd  = ((cap_s - cap_s.cummax()) / cap_s.cummax() * 100).min()
+
+    summary.append({
+        "Strategy":      name,
+        "Trades":        len(trades),
+        "Wins":          int(wins),
+        "Losses":        int(losses),
+        "Win%":          f"{wr:.1f}%",
+        "PnL ($)":       round(pnl, 2),
+        "Capital ($)":   round(final, 2),
+        "Return%":       f"{ret:.1f}%",
+        "MaxDD%":        f"{max_dd:.1f}%",
+        "Avg Win":       round(avg_win, 3),
+        "Avg Loss":      round(avg_loss, 3),
+    })
+
+# ─────────────────────────────────────────────
+# RESULTS
+# ─────────────────────────────────────────────
+print("=" * 100)
+print(f"   BTC/USD {INTERVAL} SCALPING BACKTEST  |  ${STARTING_CAPITAL} Capital  |  1:{LEVERAGE} Leverage  |  {RISK_PCT*100}% Risk/Trade")
+print(f"   Period: {df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')}  |  RR: {RR}:1")
+print("=" * 100)
+
+summary_df = pd.DataFrame(summary)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 160)
+print(summary_df.to_string(index=False))
+print("=" * 100)
+
+# Trade logs
+for i, (name, _, _) in enumerate(strategies):
+    trades = all_trades[i]
+    if len(trades) == 0:
+        print(f"\n  {name}: No signals generated.")
+        continue
+    print(f"\n{'─'*100}")
+    print(f"  {name}  — Last 15 Trades")
+    print(f"{'─'*100}")
+    print(trades[["entry_time","exit_time","direction","entry","exit","result","pnl","capital"]].tail(15).to_string(index=False))
+
+# Winner
+print("\n" + "=" * 100)
+best_idx = summary_df["PnL ($)"].idxmax()
+best     = summary_df.iloc[best_idx]
+print(f"  🏆  WINNER    : {best['Strategy']}")
+print(f"      Trades    : {best['Trades']}")
+print(f"      PnL       : ${best['PnL ($)']}")
+print(f"      Return    : {best['Return%']}")
+print(f"      Win Rate  : {best['Win%']}")
+print(f"      Max DD    : {best['MaxDD%']}")
+print(f"      Avg Win   : ${best['Avg Win']}  |  Avg Loss: ${best['Avg Loss']}")
+print("=" * 100)
+
+# Save
+valid = [t for t in all_trades if len(t) > 0]
+if valid:
+    pd.concat(valid, ignore_index=True).to_csv("scalp_backtest_trades.csv", index=False)
+    print(f"\n📄 Full trade log → scalp_backtest_trades.csv")
+print("✅ Done!\n")
+
+# ─────────────────────────────────────────────
+# QUICK SWITCH TO 1m (uncomment to use)
+# ─────────────────────────────────────────────
+# Change INTERVAL = "1m" and LOOKBACK_DAYS = 6 at the top
+# 1m gives ~2000 candles over 6 days — ultra fast scalp signals
