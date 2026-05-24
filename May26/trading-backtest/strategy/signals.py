@@ -1,32 +1,31 @@
 """
-strategy/signals.py — Regime-aware signal generation.
+strategy/signals.py — Asset-specific, regime-aware signal generation.
 
 Signal encoding:
    1  = go long
   -1  = go short
    0  = flat / no position
 
-Rules (all thresholds live in config.STRAT — nothing hardcoded here):
+BTC (Improvement 1 + 3):
+  Bull regime (P(Bull) > bull_prob_threshold):
+    → LONG when:
+      1. close > 20-day prior high  (breakout confirmation)
+      2. volume > vol_mult × 20d avg volume  (volume confirmation)
+      3. ADX_14 > adx_bull_min  (trending market, not noise)
+  Bear regime:
+    → SHORT if allow_shorting AND close < 20d prior low AND same vol/ADX
 
-  BULL regime:
-    → LONG when composite momentum score > 0
-      score = average of (normalised ROC, normalised RSI)
-      Extra guard: RSI must exceed momentum_rsi_min (avoids chasing
-      already-overbought entries)
-
-  SIDEWAYS regime:
-    → LONG  when RSI_14 < rsi_oversold  (mean-reversion buy)
-    → SHORT when RSI_14 > rsi_overbought (mean-reversion sell)
-      [SHORT arm only active when STRAT["allow_shorting"] is True]
-
-  BEAR regime:
-    → SHORT if allow_shorting else FLAT
+XAU (Improvement 2 + 3):
+  Sideways OR Bull regime:
+    → LONG when close <= bb_lower AND ADX_14 < adx_bear_max
+  Sideways regime only:
+    → SHORT when close >= bb_upper AND ADX_14 < adx_bear_max (if allow_shorting)
+  Bear regime:
+    → FLAT (gold crashes are violent — sit out)
 
 Lookahead contract:
-  Features at row t are computed from data available at close of bar t.
-  Signals computed here use features[t] → legitimate (no future data).
-  The backtest engine MUST shift signals by 1 bar before execution so
-  trades are entered at the open of bar t+1.
+  All features at row t are computed from data ≤ bar t.
+  The backtest engine shifts signals by +1 bar so entries fill at t+1.
 """
 
 import sys
@@ -39,81 +38,153 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import STRAT
 
 
-# ── MOMENTUM SCORE ────────────────────────────────────────────────────────────
+# ── REGIME SELECTOR ───────────────────────────────────────────────────────────
 
-def _momentum_score(df: pd.DataFrame) -> pd.Series:
+def _regime_masks(df: pd.DataFrame):
     """
-    Composite momentum score ∈ (-∞, +∞), positive = bullish.
-
-    Components:
-      roc_norm  : ROC normalised by its rolling 252-day std
-                  → scale-independent across assets and time
-      rsi_norm  : (RSI_14 − 50) / 50  → maps [0, 100] to [−1, +1]
+    Return (bull, side, bear) boolean Series.
+    Uses soft HMM probability columns when available (v2+);
+    falls back to hard regime labels.
     """
-    roc_col  = f"roc_{STRAT['momentum_roc_period']}"
+    thresh = STRAT.get("bull_prob_threshold", 0.60)
 
-    # Normalise ROC: rolling std with 60-bar min-period so signal fires early
-    roc_std  = df[roc_col].rolling(252, min_periods=60).std().replace(0, np.nan)
-    roc_norm = df[roc_col] / roc_std
+    if "bull_prob" in df.columns and df["bull_prob"].notna().any():
+        bull = df["bull_prob"] > thresh
+        bear = df["bear_prob"] > thresh if "bear_prob" in df.columns else (df["regime"] == "Bear")
+        side = ~bull & ~bear
+    else:
+        bull = df["regime"] == "Bull"
+        side = df["regime"] == "Sideways"
+        bear = df["regime"] == "Bear"
 
-    rsi_norm = (df["rsi_14"] - 50.0) / 50.0
-
-    return (roc_norm + rsi_norm) / 2.0
+    return bull, side, bear
 
 
-# ── SIGNAL GENERATOR ─────────────────────────────────────────────────────────
+# ── BTC SIGNAL (volume-confirmed breakout) ────────────────────────────────────
 
-def compute_signals(feat_df: pd.DataFrame) -> pd.DataFrame:
+def _btc_signals(df: pd.DataFrame) -> pd.Series:
     """
-    Compute regime-aware trading signals for every bar in feat_df.
+    Improvement 1: volume-confirmed N-day breakout.
+    Improvement 3: ADX trend-strength gate.
+    """
+    allow    = STRAT["allow_shorting"]
+    vol_mult = STRAT.get("vol_mult", 1.5)
+    adx_min  = STRAT.get("adx_bull_min", 25)
+
+    bull, side, bear = _regime_masks(df)
+
+    sig = pd.Series(0, index=df.index, dtype=int)
+
+    # Volume confirmation mask (applies to both long and short)
+    vol_ok = df["vol_ratio_20"] > vol_mult
+
+    # ADX trend confirmation (strong trend required for breakout)
+    adx_ok = df["adx_14"] > adx_min
+
+    # Long: breakout above 20d high in Bull regime
+    long_cond = (
+        bull
+        & (df["close"] > df["roll_high_20"])   # closes above prior 20d high
+        & vol_ok
+        & adx_ok
+    )
+    sig[long_cond] = 1
+
+    # Short: break below 20d low in Bear regime
+    if allow:
+        short_cond = (
+            bear
+            & (df["close"] < df["roll_low_20"])
+            & vol_ok
+            & adx_ok
+        )
+        sig[short_cond] = -1
+
+    return sig
+
+
+# ── XAU SIGNAL (Bollinger Band mean-reversion) ────────────────────────────────
+
+def _xau_signals(df: pd.DataFrame) -> pd.Series:
+    """
+    Improvement 2: BB mean-reversion on daily bars with sticky hold.
+    Improvement 3: ADX ranging gate (ADX < adx_bear_max) on ENTRY only.
+
+    Sticky logic: once price touches lower BB (entry trigger), signal stays
+    LONG until price reaches the upper BB or regime turns Bear.  This lets
+    trades run to TP/SL instead of exiting the moment price leaves the lower
+    band (which averaged 2.7 days — not enough for 3×ATR target).
+    """
+    allow   = STRAT["allow_shorting"]
+    adx_max = STRAT.get("adx_bear_max", 25)
+
+    bull, side, bear = _regime_masks(df)
+
+    # Numpy arrays for the inner loop (faster than .iloc)
+    close     = df["close"].values
+    bb_lower  = df["bb_lower"].values
+    bb_upper  = df["bb_upper"].values
+    adx       = df["adx_14"].values
+    is_bear   = bear.values
+    is_long_r = (side | bull).values   # Bull or Sideways = allowed regime
+
+    # Entry: price at/below lower BB, ranging market, non-Bear
+    entry = (
+        is_long_r
+        & (close <= bb_lower)
+        & (adx < adx_max)
+    )
+    # Exit: price reaches upper BB or Bear regime (ADX no longer required once in trade)
+    exit_ = is_bear | (close >= bb_upper)
+
+    sig_arr = np.zeros(len(df), dtype=int)
+    active_long = False
+    for i in range(len(df)):
+        if exit_[i]:
+            active_long = False
+        if entry[i]:
+            active_long = True
+        if active_long:
+            sig_arr[i] = 1
+
+    sig = pd.Series(sig_arr, index=df.index, dtype=int)
+
+    # Bear bars are always flat (redundant safety override)
+    sig[bear] = 0
+
+    return sig
+
+
+# ── UNIFIED ENTRY POINT ───────────────────────────────────────────────────────
+
+def compute_signals(feat_df: pd.DataFrame, asset_key: str = "BTC") -> pd.DataFrame:
+    """
+    Compute regime-aware trading signals for every bar.
 
     Parameters
     ----------
-    feat_df : pd.DataFrame
-        Must contain columns: regime, rsi_14, roc_{period}, atr_{window}.
-        Rows with NaN regime are assigned signal = 0.
+    feat_df   : DataFrame with all feature columns, regime, and HMM probabilities.
+    asset_key : "BTC" → breakout strategy; "XAU" → BB mean-reversion strategy.
 
     Returns
     -------
-    pd.DataFrame with added columns:
-      momentum_score : continuous composite score (diagnostic)
-      raw_signal     : signal before any NaN-masking
-      signal         : final signal (0 where regime/features are NaN)
+    DataFrame with added columns:
+      signal    : final entry signal (0 / 1 / -1)
+      raw_signal: same, before NaN masking (diagnostic)
     """
-    df    = feat_df.copy()
-    allow = STRAT["allow_shorting"]
+    df = feat_df.copy()
 
-    mom   = _momentum_score(df)
-    df["momentum_score"] = mom
+    if asset_key == "BTC":
+        sig = _btc_signals(df)
+    else:
+        sig = _xau_signals(df)
 
-    sig   = pd.Series(0, index=df.index, dtype=int)
-
-    # ── Bull: momentum long ───────────────────────────────────────────────────
-    bull = df["regime"] == "Bull"
-    bull_long = (
-        bull
-        & (mom > 0)
-        & (df["rsi_14"] > STRAT["momentum_rsi_min"])   # not already overbought
-    )
-    sig[bull_long] = 1
-
-    # ── Sideways: mean reversion ──────────────────────────────────────────────
-    side = df["regime"] == "Sideways"
-    sig[side & (df["rsi_14"] < STRAT["rsi_oversold"])]  = 1    # buy dip
-    if allow:
-        sig[side & (df["rsi_14"] > STRAT["rsi_overbought"])] = -1  # sell spike
-
-    # ── Bear: short or flat ───────────────────────────────────────────────────
-    bear = df["regime"] == "Bear"
-    if allow:
-        sig[bear] = -1
-    # else: remain 0 (flat) in Bear — default
-
-    # ── Mask rows where regime or key features are NaN ───────────────────────
+    # Mask rows where key features are NaN
     bad_mask = (
         df["regime"].isna()
-        | df["rsi_14"].isna()
-        | mom.isna()
+        | df["adx_14"].isna()
+        | df["bb_lower"].isna()
+        | (df["roll_high_20"].isna() if "roll_high_20" in df.columns else False)
     )
     sig[bad_mask] = 0
 
@@ -127,23 +198,23 @@ def compute_signals(feat_df: pd.DataFrame) -> pd.DataFrame:
 
 def print_signal_summary(df: pd.DataFrame, asset_key: str) -> None:
     """Print signal distribution by type and by regime."""
-    sig = df["signal"]
-    reg = df["regime"]
+    sig  = df["signal"]
+    reg  = df["regime"]
+    strategy = "Breakout" if asset_key == "BTC" else "BB Mean-Rev"
 
-    total    = len(df)
-    n_long   = (sig ==  1).sum()
-    n_short  = (sig == -1).sum()
-    n_flat   = (sig ==  0).sum()
+    total   = len(df)
+    n_long  = (sig ==  1).sum()
+    n_short = (sig == -1).sum()
+    n_flat  = (sig ==  0).sum()
 
-    # Count signal *changes* (actual trade triggers)
-    changes  = sig.diff().fillna(0)
+    changes       = sig.diff().fillna(0)
     entries_long  = ((changes > 0) & (sig == 1)).sum()
     entries_short = ((changes < 0) & (sig == -1)).sum()
     exits         = ((sig == 0) & (changes != 0)).sum()
 
-    print(f"\n  {'─'*58}")
-    print(f"  {asset_key} Signal Summary")
-    print(f"  {'─'*58}")
+    print(f"\n  {'─'*60}")
+    print(f"  {asset_key} Signal Summary  [{strategy}]")
+    print(f"  {'─'*60}")
     print(f"  Total bars    : {total:,}")
     print(f"  Long bars     : {n_long:,}  ({n_long/total*100:.1f}%)")
     print(f"  Short bars    : {n_short:,}  ({n_short/total*100:.1f}%)")
@@ -153,13 +224,12 @@ def print_signal_summary(df: pd.DataFrame, asset_key: str) -> None:
     print(f"    Short entries : {entries_short:,}")
     print(f"    Exits to flat : {exits:,}")
 
-    # Breakdown by regime
     print(f"\n  Signal by regime:")
     print(f"  {'Regime':<12} {'Long':>7} {'Short':>7} {'Flat':>7} {'Total':>7}")
     print(f"  {'─'*40}")
     for regime in ["Bull", "Sideways", "Bear"]:
-        mask  = reg == regime
-        n     = mask.sum()
+        mask = reg == regime
+        n    = mask.sum()
         if n == 0:
             continue
         nl = (sig[mask] ==  1).sum()
@@ -168,16 +238,22 @@ def print_signal_summary(df: pd.DataFrame, asset_key: str) -> None:
         print(f"  {regime:<12} {nl:>7,} {ns:>7,} {nf:>7,} {n:>7,}")
     print(f"  {'─'*40}")
 
-    # Recent 5 signals with context
-    recent = df[sig != 0].tail(5)[
-        ["close", "regime", "rsi_14", "momentum_score", "signal"]
-    ].copy()
+    recent = df[sig != 0].tail(5)
+    if len(recent) == 0:
+        print(f"\n  (no active signals in history)")
+        return
+
+    cols = ["close", "regime", "adx_14", "signal"]
+    if asset_key == "BTC":
+        cols += ["roll_high_dist", "vol_ratio_20"]
+    else:
+        cols += ["bb_pct", "bb_lower", "bb_upper"]
+    cols = [c for c in cols if c in recent.columns]
+
+    recent = recent[cols].copy()
     recent["signal_str"] = recent["signal"].map({1: "LONG", -1: "SHORT"})
     print(f"\n  Last 5 active signals:")
-    print(f"  {'Date':<14} {'Close':>10} {'Regime':<10} {'RSI':>6} "
-          f"{'MomScore':>10} {'Signal':>7}")
-    print(f"  {'─'*58}")
     for ts, row in recent.iterrows():
-        print(f"  {str(ts.date()):<14} {row['close']:>10,.2f} "
-              f"{row['regime']:<10} {row['rsi_14']:>6.1f} "
-              f"{row['momentum_score']:>10.3f} {row['signal_str']:>7}")
+        print(f"  {str(ts.date()):<14} close={row['close']:>10,.2f}  "
+              f"regime={row['regime']:<10}  adx={row['adx_14']:>5.1f}  "
+              f"{row['signal_str']}")

@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import FEAT, ASSETS
+from config import FEAT, ASSETS, STRAT
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -48,6 +48,35 @@ def _rsi(series: pd.Series, window: int) -> pd.Series:
     loss  = (-delta.clip(upper=0)).ewm(com=window - 1, adjust=False).mean()
     rs    = gain / (loss + 1e-9)
     return 100 - 100 / (1 + rs)
+
+
+def _adx(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """
+    Average Directional Index (Wilder smoothing).
+    ADX > 25 → trending; ADX < 20 → ranging/flat.
+    No lookahead: uses only past OHLC data.
+    """
+    high  = df["high"]
+    low   = df["low"]
+    tr    = _true_range(df)
+
+    up_move   = (high - high.shift(1)).clip(lower=0)
+    down_move = (low.shift(1) - low).clip(lower=0)
+
+    plus_dm  = np.where((up_move > down_move), up_move,  0.0)
+    minus_dm = np.where((down_move > up_move), down_move, 0.0)
+
+    plus_dm_s  = pd.Series(plus_dm,  index=df.index)
+    minus_dm_s = pd.Series(minus_dm, index=df.index)
+
+    com = window - 1
+    tr14       = tr.ewm(com=com, adjust=False).mean()
+    plus_di    = 100 * plus_dm_s.ewm(com=com, adjust=False).mean()  / (tr14 + 1e-9)
+    minus_di   = 100 * minus_dm_s.ewm(com=com, adjust=False).mean() / (tr14 + 1e-9)
+
+    dx  = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    adx = dx.ewm(com=com, adjust=False).mean()
+    return adx
 
 
 def _hurst_rs(arr: np.ndarray) -> float:
@@ -109,12 +138,17 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         # ewm(span=w) = Wilder's smoothing (com = w-1)
         d[f"atr_{w}"] = tr.ewm(span=w, adjust=False).mean()
 
-    # ── 4. BOLLINGER BAND WIDTH ───────────────────────────────────────────────
+    # ── 4. BOLLINGER BANDS ────────────────────────────────────────────────────
     bb_w   = FEAT["bb_window"]
     bb_mid = c.rolling(bb_w).mean()
     bb_std = c.rolling(bb_w).std(ddof=1)
-    # width normalised by mid-band so it is scale-independent
+    bb_upper = bb_mid + FEAT["bb_std"] * bb_std
+    bb_lower = bb_mid - FEAT["bb_std"] * bb_std
     d["bb_width"] = (2 * FEAT["bb_std"] * bb_std) / (bb_mid + 1e-9)
+    d["bb_upper"] = bb_upper   # Improvement 2: raw upper band for XAU signals
+    d["bb_lower"] = bb_lower   # Improvement 2: raw lower band for XAU signals
+    # Normalised position within band: 0 = at lower, 1 = at upper
+    d["bb_pct"]   = (c - bb_lower) / (bb_upper - bb_lower + 1e-9)
 
     # ── 5. SMA DISTANCE (% above/below SMA) ──────────────────────────────────
     for w in FEAT["sma_windows"]:
@@ -155,6 +189,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     long_vol  = d[f"rvol_{FEAT['vol_windows'][1]}"]   # 60-day
     d["vol_ratio"] = short_vol / (long_vol + 1e-9)
 
+    # ── 12. BREAKOUT LEVELS (Improvement 1 — BTC volume-confirmed breakout) ──
+    bw = FEAT["breakout_window"]
+    # Shift by 1 so today's close is compared to the PRIOR N-day range (no lookahead)
+    d["roll_high_20"]  = c.shift(1).rolling(bw).max()
+    d["roll_low_20"]   = c.shift(1).rolling(bw).min()
+    # Normalised distances: positive = above, negative = below
+    d["roll_high_dist"] = (c / (d["roll_high_20"] + 1e-9) - 1) * 100
+    d["roll_low_dist"]  = (c / (d["roll_low_20"]  + 1e-9) - 1) * 100
+
+    # ── 13. RELATIVE VOLUME (Improvement 1 — volume confirmation) ─────────────
+    d["vol_ma_20"]    = d["volume"].rolling(bw).mean()
+    d["vol_ratio_20"] = d["volume"] / (d["vol_ma_20"] + 1e-9)
+
+    # ── 14. ADX — Average Directional Index (Improvement 3) ───────────────────
+    d["adx_14"] = _adx(d, window=FEAT["adx_window"])
+
     return d
 
 
@@ -163,13 +213,14 @@ FEATURE_COLS = (
     ["log_ret"]
     + [f"rvol_{w}"     for w in FEAT["vol_windows"]]
     + [f"atr_{w}"      for w in FEAT["atr_windows"]]
-    + ["bb_width"]
+    + ["bb_width", "bb_pct"]
     + [f"sma{w}_dist"  for w in FEAT["sma_windows"]]
     + [f"roc_{w}"      for w in FEAT["roc_windows"]]
     + [f"rsi_{w}"      for w in FEAT["rsi_windows"]]
     + ["macd_hist"]
     + [f"sharpe_{w}"   for w in FEAT["sharpe_windows"]]
     + ["hurst", "vol_ratio"]
+    + ["roll_high_dist", "roll_low_dist", "vol_ratio_20", "adx_14"]
 )
 
 

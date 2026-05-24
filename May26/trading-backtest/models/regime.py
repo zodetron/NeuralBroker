@@ -228,6 +228,17 @@ def detect_regimes(feat_df: pd.DataFrame, asset_key: str) -> pd.DataFrame:
     df_out        = feat_df.copy()
     df_out["regime"] = regime_series                # NaN for warm-up rows
 
+    # ── 5b. Store HMM state probabilities (Fix 2: soft regime threshold) ─────
+    # predict_proba returns smoothed posteriors shape (T, n_states)
+    state_proba = model.predict_proba(obs_scaled)   # (T, n_states)
+    # Map each column (state index) to its regime name
+    for state_idx, regime_name in state_map.items():
+        col = f"{regime_name.lower()}_prob"         # bull_prob, bear_prob, sideways_prob
+        prob_series = pd.Series(
+            state_proba[:, state_idx], index=obs_df.index, name=col
+        )
+        df_out[col] = prob_series                   # NaN for warm-up rows
+
     # ── 6. Print statistics ───────────────────────────────────────────────────
     valid = df_out.dropna(subset=["regime", "log_ret", "rvol_20"])
 

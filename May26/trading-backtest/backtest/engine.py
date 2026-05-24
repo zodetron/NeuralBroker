@@ -46,15 +46,18 @@ class Trade:
         "units", "stop_price", "tp_price",
         "pnl", "pnl_pct", "exit_reason",
         "entry_capital",
+        # Improvement 4 — trailing stop fields
+        "atr_at_entry", "trail_active", "trail_ref",
     ]
 
     def __init__(
         self,
         entry_date, direction, entry_price, units,
         stop_price, tp_price, entry_capital,
+        atr_at_entry: float = 0.0,
     ):
         self.entry_date    = entry_date
-        self.direction     = direction      # +1 long, -1 short
+        self.direction     = direction
         self.entry_price   = entry_price
         self.units         = units
         self.stop_price    = stop_price
@@ -65,6 +68,10 @@ class Trade:
         self.pnl           = 0.0
         self.pnl_pct       = 0.0
         self.exit_reason   = ""
+        # Trailing stop state
+        self.atr_at_entry  = atr_at_entry
+        self.trail_active  = False
+        self.trail_ref     = entry_price    # highest (long) or lowest (short) close seen
 
     def close(self, exit_date, exit_price: float, reason: str) -> None:
         self.exit_date   = exit_date
@@ -86,7 +93,7 @@ class Trade:
 
 # ── CORE BACKTEST LOOP ────────────────────────────────────────────────────────
 
-def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]]:
+def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, List[Trade]]:
     """
     Bar-by-bar simulation for one asset.
 
@@ -103,9 +110,14 @@ def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]
       equity_curve : pd.Series indexed like df, starting at BT["initial_capital"]
       trades       : list of closed Trade objects
     """
-    capital   = BT["initial_capital"]
-    atr_col   = f"atr_{STRAT['atr_window']}"
-    allow     = STRAT["allow_shorting"]
+    capital      = BT["initial_capital"]
+    atr_col      = f"atr_{STRAT['atr_window']}"
+    allow        = STRAT["allow_shorting"]
+    min_hold     = STRAT.get("min_hold_bars", 0)
+    # Improvement 4: trailing stop only for BTC
+    use_trail    = (asset_key == "BTC")
+    trail_trig   = STRAT.get("trail_trigger_mult", 1.0)
+    trail_dist   = STRAT.get("trail_stop_mult",    1.0)
 
     # Shift signals by 1 bar — enter at next bar's execution price (close used as proxy)
     # Using close as entry proxy (open unavailable for daily data from yfinance/ccxt)
@@ -123,6 +135,7 @@ def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]
     equity.iloc[0] = capital
 
     active_trade: Optional[Trade] = None
+    bars_held    = 0                # Fix 1: bars elapsed since current trade entry
     trades: List[Trade] = []
 
     bars = df.index.tolist()
@@ -132,31 +145,56 @@ def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]
 
         # ── Manage open position ──────────────────────────────────────────────
         if active_trade is not None:
+            bars_held += 1
             t  = active_trade
             lo = bar["low"]
             hi = bar["high"]
             cl = bar["close"]
 
+            # Improvement 4: update trailing stop for BTC
+            if use_trail and t.atr_at_entry > 0:
+                trig_px = t.atr_at_entry * trail_trig
+                dist_px = t.atr_at_entry * trail_dist
+                if t.direction == 1:
+                    t.trail_ref = max(t.trail_ref, cl)
+                    if not t.trail_active and (t.trail_ref - t.entry_price) >= trig_px:
+                        t.trail_active = True
+                    if t.trail_active:
+                        new_stop = t.trail_ref - dist_px
+                        if new_stop > t.stop_price:      # only ever raise the stop
+                            t.stop_price = new_stop
+                else:
+                    t.trail_ref = min(t.trail_ref, cl)
+                    if not t.trail_active and (t.entry_price - t.trail_ref) >= trig_px:
+                        t.trail_active = True
+                    if t.trail_active:
+                        new_stop = t.trail_ref + dist_px
+                        if new_stop < t.stop_price:      # only ever lower the stop
+                            t.stop_price = new_stop
+
             exit_price  = None
             exit_reason = ""
 
-            if t.direction == 1:    # long
+            # Hard SL/TP (or trailing stop): always checked
+            if t.direction == 1:
                 if lo <= t.stop_price:
-                    exit_price  = apply_slippage(t.stop_price, -1)   # adverse: sell lower
-                    exit_reason = "SL"
+                    reason      = "TrailSL" if t.trail_active else "SL"
+                    exit_price  = apply_slippage(t.stop_price, -1)
+                    exit_reason = reason
                 elif hi >= t.tp_price:
                     exit_price  = apply_slippage(t.tp_price, -1)
                     exit_reason = "TP"
-            else:                   # short
+            else:
                 if hi >= t.stop_price:
-                    exit_price  = apply_slippage(t.stop_price, 1)    # adverse: buy higher
-                    exit_reason = "SL"
+                    reason      = "TrailSL" if t.trail_active else "SL"
+                    exit_price  = apply_slippage(t.stop_price, 1)
+                    exit_reason = reason
                 elif lo <= t.tp_price:
                     exit_price  = apply_slippage(t.tp_price, 1)
                     exit_reason = "TP"
 
-            # Signal exit: position direction no longer aligned
-            if exit_price is None:
+            # Signal exit: only allowed after min_hold_bars
+            if exit_price is None and bars_held >= min_hold:
                 cur_sig = entry_sig.iloc[i]
                 if cur_sig != t.direction or cur_sig == 0:
                     exit_price  = apply_slippage(cl, -t.direction)
@@ -167,6 +205,7 @@ def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]
                 capital += t.pnl
                 trades.append(t)
                 active_trade = None
+                bars_held    = 0
 
         # ── Open new position (only if flat) ─────────────────────────────────
         if active_trade is None:
@@ -190,6 +229,7 @@ def _run_asset(df: pd.DataFrame, asset_key: str) -> Tuple[pd.Series, List[Trade]
                         stop_price    = sizing["stop_price"],
                         tp_price      = sizing["tp_price"],
                         entry_capital = capital,
+                        atr_at_entry  = atr,
                     )
 
         # ── Mark-to-market equity ─────────────────────────────────────────────

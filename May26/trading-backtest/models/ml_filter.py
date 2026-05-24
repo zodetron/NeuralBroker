@@ -38,18 +38,32 @@ warnings.filterwarnings("ignore")
 
 # ── LABEL CONSTRUCTION ────────────────────────────────────────────────────────
 
+def _detect_forward_days(df: pd.DataFrame) -> int:
+    """
+    Auto-detect appropriate forward_days based on bar frequency.
+    Weekly bars (median gap > 5 calendar days) → 1 bar forward.
+    Daily bars → ML["forward_days"] (default 5).
+    """
+    if len(df) < 2:
+        return ML["forward_days"]
+    gaps = np.diff(df.index.astype(np.int64)) / 1e9 / 86400  # in days
+    median_gap = float(np.median(gaps))
+    return 1 if median_gap > 5 else ML["forward_days"]
+
+
 def build_labels(df: pd.DataFrame) -> pd.Series:
     """
     Binary label: 1 if close rises over the next forward_days bars, else 0.
     Last forward_days rows are NaN (future not yet observable).
 
+    Auto-detects weekly vs daily bars and adjusts forward_days accordingly.
     No lookahead: labels are only used on the TRAINING portion of each
     walk-forward window.  The OOS predictions never use labels.
     """
-    fwd = ML["forward_days"]
+    fwd = _detect_forward_days(df)
     fwd_close = df["close"].shift(-fwd)
     label = (fwd_close > df["close"]).astype(float)
-    label.iloc[-fwd:] = np.nan   # no label for the final rows
+    label.iloc[-fwd:] = np.nan
     return label.rename("label")
 
 
@@ -118,7 +132,12 @@ def run_walk_forward(
           ml_confidence : P(fwd return > 0), NaN outside OOS periods
           ml_signal     : 1 if ml_confidence > ML["min_confidence"], else 0
     """
-    fwd = ML["forward_days"]
+    fwd = _detect_forward_days(df)
+
+    # Auto-scale min_train_samples for weekly bars (weekly: ~52 bars/year)
+    median_gap = float(np.median(np.diff(df.index.astype(np.int64)) / 1e9 / 86400)) if len(df) > 1 else 1
+    is_weekly  = median_gap > 5
+    min_samples = max(40, ML["min_train_samples"] // 4) if is_weekly else ML["min_train_samples"]
 
     # ── Prepare labels + feature matrix ──────────────────────────────────────
     df       = df.copy()
@@ -133,7 +152,7 @@ def run_walk_forward(
     idx    = full_df.index
 
     scaler = StandardScaler()
-    X_all  = scaler.fit_transform(X_all)   # standardise once across full history
+    X_all  = scaler.fit_transform(X_all)
 
     windows = _make_windows(idx)
     if not windows:
@@ -143,8 +162,10 @@ def run_walk_forward(
         df["ml_signal"]     = 0
         return df
 
+    freq_label = "weekly" if is_weekly else "daily"
     print(f"  {asset_key}: {len(windows)} walk-forward windows  "
-          f"(train={ML['wf_train_months']}mo, test={ML['wf_test_months']}mo)")
+          f"(train={ML['wf_train_months']}mo, test={ML['wf_test_months']}mo, "
+          f"bars={freq_label}, fwd={fwd}, min_samples={min_samples})")
 
     oos_records   = []     # {date → {actual, predicted, confidence}}
     per_window    = []     # per-window metrics
@@ -162,7 +183,7 @@ def run_walk_forward(
         X_te, y_te = X_all[test_mask],  y_all[test_mask]
         idx_te     = idx[test_mask]
 
-        if len(X_tr) < ML["min_train_samples"] or len(X_te) == 0:
+        if len(X_tr) < min_samples or len(X_te) == 0:
             continue
         if y_tr.sum() == 0 or y_tr.sum() == len(y_tr):
             continue   # degenerate labels (all one class)
@@ -251,6 +272,11 @@ def _print_oos_report(
     print(f"\n  {'─'*68}")
     print(f"  {asset_key} Walk-Forward Results  ({len(pw_df)} windows)")
     print(f"  {'─'*68}")
+
+    if pw_df.empty:
+        print(f"  ⚠  No completed OOS windows — all skipped (insufficient samples).")
+        print(f"  {'─'*68}")
+        return
     print(f"  {'Win':>4} {'Train start':>12} {'Test period':>22}  "
           f"{'N_tr':>6} {'N_te':>5} {'Prec':>6} {'Rec':>6} {'F1':>6} {'AUC':>6}")
     print(f"  {'─'*68}")

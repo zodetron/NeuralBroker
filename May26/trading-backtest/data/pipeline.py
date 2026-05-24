@@ -221,6 +221,33 @@ def load_xau(force_refresh: bool = False) -> pd.DataFrame:
     return df
 
 
+def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample a UTC-daily OHLCV DataFrame to weekly bars anchored on Friday.
+
+    Aggregation:
+      open   → first trading day's open in the week
+      high   → week's highest high
+      low    → week's lowest low
+      close  → last trading day's close (Friday or preceding day if holiday)
+      volume → sum of the week's volume
+
+    Weeks with no valid close (entirely missing) are dropped.
+    """
+    weekly = df.resample("W-FRI").agg({
+        "open":   "first",
+        "high":   "max",
+        "low":    "min",
+        "close":  "last",
+        "volume": "sum",
+    })
+    weekly = weekly.dropna(subset=["close"])
+    weekly = weekly[weekly["close"] > 0]
+    weekly.index = pd.to_datetime(weekly.index, utc=True)
+    weekly.index.name = "date"
+    return weekly
+
+
 def load_asset(key: str, force_refresh: bool = False) -> pd.DataFrame:
     """Convenience wrapper: load_asset('BTC') or load_asset('XAU')."""
     if key == "BTC":

@@ -8,7 +8,8 @@ from pathlib import Path
 # ── PATHS ─────────────────────────────────────────────────────────────────────
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
-RESULTS = ROOT / "results"
+RESULTS = ROOT / "results" / "v3"
+RESULTS.mkdir(parents=True, exist_ok=True)
 
 # ── ASSETS ────────────────────────────────────────────────────────────────────
 ASSETS = {
@@ -45,6 +46,8 @@ FEAT = {
     "hurst_window":   60,              # Hurst exponent rolling window
     "sharpe_windows": [20, 60],        # rolling Sharpe windows
     "log_return_clip":0.2,             # clip extreme log returns for stability
+    "breakout_window": 20,             # Improvement 1: N-day high/low for BTC breakout
+    "adx_window":      14,             # Improvement 3: ADX period
 }
 
 # ── REGIME DETECTION (HMM) ────────────────────────────────────────────────────
@@ -80,12 +83,29 @@ STRAT = {
 
     # ATR window used for sizing and stops
     "atr_window":       14,
+
+    # Min bars held before a Signal exit; hard SL/TP can still fire any bar
+    "min_hold_bars":    5,
+
+    # Soft HMM Bull probability threshold (Fix 2, carried forward)
+    "bull_prob_threshold": 0.60,
+
+    # Improvement 1 — BTC volume-confirmed breakout
+    "vol_mult":          1.5,   # volume must be > N× 20d average on entry bar
+
+    # Improvement 3 — ADX trend-strength filter
+    "adx_bull_min":      25,    # BTC momentum: only enter when ADX > 25 (trending)
+    "adx_bear_max":      25,    # XAU mean-rev: only enter when ADX < 25 (ranging)
+
+    # Improvement 4 — BTC trailing stop
+    "trail_trigger_mult": 1.0,  # activate trailing after price moves 1×ATR in profit
+    "trail_stop_mult":    1.0,  # trail distance = 1×ATR from highest close
 }
 
 # ── ML FILTER (XGBoost) ───────────────────────────────────────────────────────
 ML = {
     "forward_days":           5,      # label = 1 if fwd return > 0 over next 5d
-    "min_confidence":         0.55,   # only trade if P(positive) > 0.55
+    "min_confidence":         0.50,   # majority-vote ML gate — 0.62 killed 93% of BTC breakout signals
     "wf_train_months":        12,     # walk-forward: train window
     "wf_test_months":         3,      # walk-forward: test window
     "min_train_samples":      200,    # skip window if fewer training samples
@@ -108,6 +128,9 @@ BT = {
     "commission":      0.001,    # 0.1% per trade (round-trip = 0.2%)
     "slippage":        0.0005,   # 0.05% adverse slippage on fill
 }
+
+# XAU bar frequency: False = daily (v3 uses daily + BB mean-reversion)
+XAU_WEEKLY = False
 
 # ── WALK-FORWARD OPTIMISATION ─────────────────────────────────────────────────
 WFO = {
