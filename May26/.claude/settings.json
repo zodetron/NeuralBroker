@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(jobs)"
+      "Bash(jobs)",
+      "Bash(venv/bin/python3 main.py --phase 4)",
+      "Bash(venv/bin/python3 main.py --phase 5)",
+      "Bash(venv/bin/python3 main.py --phase 6)",
+      "Bash(venv/bin/python3 main.py --phase 7)"
     ]
   }
 }
