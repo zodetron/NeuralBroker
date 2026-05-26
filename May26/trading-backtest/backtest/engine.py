@@ -223,13 +223,16 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
         if active_trade is None and not session_closed:
             direction = entry_sig.iloc[i]
             if direction != 0:
-                cl  = bar["close"]
+                # XAU: fill at open — mean-reversion bounce starts at open,
+                # not at close; using close overshoots and shrinks avg_win.
+                # BTC: fill at close — momentum confirmation requires close price.
+                fill_base = bar["open"] if asset_key == "XAU" else bar["close"]
                 atr = bar[atr_col]
                 if np.isnan(atr) or atr < 1e-9:
                     equity.iloc[i] = capital
                     continue
 
-                fill_price = apply_slippage(cl, direction)
+                fill_price = apply_slippage(fill_base, direction)
                 sizing     = size_trade(capital, fill_price, atr, direction, asset_key)
 
                 if sizing["units"] > 0:
@@ -484,6 +487,24 @@ def _print_comparison(
         print(f"\n  Exit reasons:")
         for reason, count in reasons.items():
             print(f"    {reason:<12} {count:>6,}  ({count/len(trades)*100:.1f}%)")
+
+    # Avg win vs avg loss comparison (key diagnostic for fill-lag fix)
+    if trades:
+        wins   = [t for t in trades if t.pnl > 0]
+        losses = [t for t in trades if t.pnl < 0]
+        avg_w  = np.mean([t.pnl for t in wins])   if wins   else 0.0
+        avg_l  = np.mean([t.pnl for t in losses]) if losses else 0.0
+        ratio  = avg_w / abs(avg_l) if avg_l != 0 else float("inf")
+        print(f"\n  {'─'*40}")
+        print(f"  Avg win  : ${avg_w:>8.2f}  ({len(wins):>3} trades)")
+        print(f"  Avg loss : ${avg_l:>8.2f}  ({len(losses):>3} trades)")
+        print(f"  Win/Loss ratio: {ratio:.3f}  (need >1.0 for PF improvement)")
+        if asset_key == "XAU":
+            print(f"  v3 baseline  : avg_win=$63.75  avg_loss=$-89.50  ratio=0.712")
+            delta_w = avg_w - 63.75
+            delta_l = avg_l - (-89.50)
+            print(f"  Δ vs v3      : avg_win {delta_w:+.2f}  avg_loss {delta_l:+.2f}")
+        print(f"  {'─'*40}")
 
 
 # ── MAIN ENTRY POINT ─────────────────────────────────────────────────────────

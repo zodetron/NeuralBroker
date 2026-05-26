@@ -8,7 +8,7 @@ from pathlib import Path
 # ── PATHS ─────────────────────────────────────────────────────────────────────
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
-RESULTS = ROOT / "results" / "v3"
+RESULTS = ROOT / "results" / "xau_v3b"
 RESULTS.mkdir(parents=True, exist_ok=True)
 
 # ── ASSETS ────────────────────────────────────────────────────────────────────
@@ -89,16 +89,18 @@ STRAT = {
     "atr_window":       14,
 
     # Min bars held before a Signal exit; hard SL/TP can still fire any bar
-    "min_hold_bars":    5,
+    "min_hold_bars":    3,
 
-    # Soft HMM Bull probability threshold (Fix 2, carried forward)
-    "bull_prob_threshold": 0.60,
+    # Soft HMM Bull probability threshold — 0.45 widens Bull zone for more signals
+    # while ADX>25 + vol>1.5× quality gates prevent noise trades
+    "bull_prob_threshold": 0.45,
 
     # Improvement 1 — BTC volume-confirmed breakout
     "vol_mult":          1.5,   # volume must be > N× 20d average on entry bar
 
     # Improvement 3 — ADX trend-strength filter
     "adx_bull_min":      25,    # BTC momentum: only enter when ADX > 25 (trending)
+    "adx_bull_min_xau":  20,    # XAU Bull momentum: ADX > 20 (gold trends cleanly)
     "adx_bear_max":      25,    # XAU mean-rev: only enter when ADX < 25 (ranging)
 
     # Improvement 4 — BTC trailing stop
@@ -109,7 +111,7 @@ STRAT = {
 # ── ML FILTER (XGBoost) ───────────────────────────────────────────────────────
 ML = {
     "forward_days":           5,      # label = 1 if fwd return > 0 over next 5d
-    "min_confidence":         0.00,   # bypass ML gate — signals already have 4-way confirmation
+    "min_confidence":         0.62,   # ML gate re-enabled: XAU hybrid Bull+BB signals have better AUC
     "wf_train_months":        12,     # walk-forward: train window
     "wf_test_months":         3,      # walk-forward: test window
     "min_train_samples":      200,    # skip window if fewer training samples
