@@ -147,6 +147,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     d["bb_width"] = (2 * FEAT["bb_std"] * bb_std) / (bb_mid + 1e-9)
     d["bb_upper"] = bb_upper   # Improvement 2: raw upper band for XAU signals
     d["bb_lower"] = bb_lower   # Improvement 2: raw lower band for XAU signals
+    d["bb_mid"]   = bb_mid     # 20-day SMA midpoint — XAU sticky exit target
     # Normalised position within band: 0 = at lower, 1 = at upper
     d["bb_pct"]   = (c - bb_lower) / (bb_upper - bb_lower + 1e-9)
 

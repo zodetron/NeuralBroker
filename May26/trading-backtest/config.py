@@ -67,8 +67,12 @@ STRAT = {
     "max_position_pct":  0.25,    # never commit >25% of capital to one trade
 
     # Stop loss / take profit (ATR multiples)
-    "atr_stop_mult":     1.5,     # SL = entry ± 1.5 × ATR14
-    "atr_tp_mult":       3.0,     # TP = entry ± 3.0 × ATR14  (2:1 R:R minimum)
+    "atr_stop_mult":     1.5,     # SL = entry ± 1.5 × ATR14  (BTC breakout: tight)
+    "atr_tp_mult":       3.0,     # TP = entry ± 3.0 × ATR14  (BTC: 2:1 R:R)
+    # XAU mean-reversion overrides: wide stop lets price breathe; high TP lets
+    # sticky signal's natural bb_upper exit drive profits.
+    "atr_stop_mult_xau": 3.0,     # XAU SL: 3×ATR below entry (prevents premature stops)
+    "atr_tp_mult_xau":   8.0,     # XAU TP: high enough that Signal exit (bb_upper) wins first
 
     # Momentum signal (Bull regime)
     "momentum_roc_period": 10,    # primary ROC window for bull momentum score
@@ -79,7 +83,7 @@ STRAT = {
     "rsi_overbought":   65,       # Sideways: sell when RSI14 > 65
 
     # Bear regime
-    "allow_shorting":   False,    # set True to allow short positions in Bear
+    "allow_shorting":   True,     # BTC: allow short positions in Bear (volume-confirmed breakdown)
 
     # ATR window used for sizing and stops
     "atr_window":       14,
@@ -98,14 +102,14 @@ STRAT = {
     "adx_bear_max":      25,    # XAU mean-rev: only enter when ADX < 25 (ranging)
 
     # Improvement 4 — BTC trailing stop
-    "trail_trigger_mult": 1.0,  # activate trailing after price moves 1×ATR in profit
+    "trail_trigger_mult": 2.5,  # activate trailing only after 2.5×ATR profit (near TP)
     "trail_stop_mult":    1.0,  # trail distance = 1×ATR from highest close
 }
 
 # ── ML FILTER (XGBoost) ───────────────────────────────────────────────────────
 ML = {
     "forward_days":           5,      # label = 1 if fwd return > 0 over next 5d
-    "min_confidence":         0.50,   # majority-vote ML gate — 0.62 killed 93% of BTC breakout signals
+    "min_confidence":         0.00,   # bypass ML gate — signals already have 4-way confirmation
     "wf_train_months":        12,     # walk-forward: train window
     "wf_test_months":         3,      # walk-forward: test window
     "min_train_samples":      200,    # skip window if fewer training samples

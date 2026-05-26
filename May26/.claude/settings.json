@@ -9,7 +9,10 @@
       "Bash(venv/bin/python3 main.py --phase 8)",
       "Bash(venv/bin/python3 main.py --phase 9)",
       "Bash(venv/bin/python3 -c \"from config import RESULTS, STRAT, ML, XAU_WEEKLY; print\\('RESULTS:', RESULTS\\); print\\('min_confidence:', ML['min_confidence']\\); print\\('min_hold_bars:', STRAT['min_hold_bars']\\); print\\('bull_prob_threshold:', STRAT['bull_prob_threshold']\\); print\\('XAU_WEEKLY:', XAU_WEEKLY\\)\")",
-      "Bash(venv/bin/python3 -c ' *)"
+      "Bash(venv/bin/python3 -c ' *)",
+      "Bash(venv/bin/python3 run_backtest.py)",
+      "Bash(venv/bin/python3 main.py)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

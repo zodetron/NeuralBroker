@@ -135,13 +135,19 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
     equity.iloc[0] = capital
 
     active_trade: Optional[Trade] = None
-    bars_held    = 0                # Fix 1: bars elapsed since current trade entry
+    bars_held     = 0                # Fix 1: bars elapsed since current trade entry
+    session_closed = False           # XAU: after SL/TP in a sticky session, block re-entry
+    #                                #  until signal resets to 0 (exit sticky window)
     trades: List[Trade] = []
 
     bars = df.index.tolist()
 
     for i, ts in enumerate(bars):
         bar = df.loc[ts]
+
+        # Clear session guard when signal session ends (signal goes back to 0)
+        if entry_sig.iloc[i] == 0:
+            session_closed = False
 
         # ── Manage open position ──────────────────────────────────────────────
         if active_trade is not None:
@@ -206,9 +212,15 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
                 trades.append(t)
                 active_trade = None
                 bars_held    = 0
+                # After hard SL/TP exit: lock out re-entry until this sticky
+                # signal session fully resets to 0.  Prevents dozens of
+                # re-entries when the BB mean-reversion signal stays active
+                # while price drifts below the lower band.
+                if exit_reason not in ("Signal", "EOD"):
+                    session_closed = True
 
-        # ── Open new position (only if flat) ─────────────────────────────────
-        if active_trade is None:
+        # ── Open new position (only if flat AND session not closed) ──────────
+        if active_trade is None and not session_closed:
             direction = entry_sig.iloc[i]
             if direction != 0:
                 cl  = bar["close"]
@@ -218,7 +230,7 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
                     continue
 
                 fill_price = apply_slippage(cl, direction)
-                sizing     = size_trade(capital, fill_price, atr, direction)
+                sizing     = size_trade(capital, fill_price, atr, direction, asset_key)
 
                 if sizing["units"] > 0:
                     active_trade = Trade(

@@ -39,6 +39,7 @@ def size_trade(
     entry_price: float,
     atr: float,
     direction: int,          # +1 long, -1 short
+    asset_key: str = "BTC",  # used to look up per-asset stop/TP overrides
 ) -> Dict:
     """
     Compute position size, dollar value, stop-loss, and take-profit for one trade.
@@ -61,9 +62,13 @@ def size_trade(
       tp_dist    – $ distance to TP from entry
       risk_usd   – dollars at risk (≈ risk_per_trade × capital)
     """
+    key_lo    = asset_key.lower()
+    stop_mult = STRAT.get(f"atr_stop_mult_{key_lo}", STRAT["atr_stop_mult"])
+    tp_mult   = STRAT.get(f"atr_tp_mult_{key_lo}",   STRAT["atr_tp_mult"])
+
     risk_usd  = capital * STRAT["risk_per_trade"]
-    stop_dist = STRAT["atr_stop_mult"] * atr
-    tp_dist   = STRAT["atr_tp_mult"]   * atr
+    stop_dist = stop_mult * atr
+    tp_dist   = tp_mult   * atr
 
     # Avoid division by zero or degenerate ATR
     if stop_dist < 1e-9 or atr < 1e-9:

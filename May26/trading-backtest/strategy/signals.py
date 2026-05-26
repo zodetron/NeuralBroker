@@ -128,14 +128,35 @@ def _xau_signals(df: pd.DataFrame) -> pd.Series:
     is_bear   = bear.values
     is_long_r = (side | bull).values   # Bull or Sideways = allowed regime
 
-    # Entry: price at/below lower BB, ranging market, non-Bear
+    # SMA200 trend filter: block entries in persistent downtrends.
+    # Gold 2013-2015 crash (−40%) and 2022 decline generated false bb_lower
+    # touches that continued falling. Filtering when >8% below 200d SMA avoids
+    # the worst "falling knife" entries without sacrificing normal corrections.
+    if "sma200_dist" in df.columns:
+        sma200_ok = df["sma200_dist"].values > -8.0
+    else:
+        sma200_ok = np.ones(len(df), dtype=bool)
+
+    # "First touch" — price must cross FROM above TO at/below lower band.
+    # This prevents re-entry while already below the band (e.g., after a SL hit
+    # drove price further below bb_lower, which was the re-entry bug causing 143 trades).
+    prev_above_lower = np.concatenate([[True], close[:-1] > bb_lower[:-1]])
+
+    # Entry: first crossing below lower BB, ranging market, non-Bear, not deep downtrend
     entry = (
         is_long_r
         & (close <= bb_lower)
+        & prev_above_lower          # must have been above on previous bar
         & (adx < adx_max)
+        & sma200_ok                 # not in persistent downtrend (>8% below SMA200)
     )
-    # Exit: price reaches upper BB or Bear regime (ADX no longer required once in trade)
-    exit_ = is_bear | (close >= bb_upper)
+    # Exit: ONLY when price reaches upper BB (natural mean-reversion target).
+    # Bear regime does NOT force exit — HMM is too noisy (3.4-day avg duration,
+    # 1,738 transitions), so Bear labels pop up mid-session and cause premature
+    # exits well before price reaches bb_upper.
+    # The engine's SL (3×ATR) handles genuine bear-market risk.
+    # New entries are still blocked during Bear (entry requires is_long_r).
+    exit_ = close >= bb_upper
 
     sig_arr = np.zeros(len(df), dtype=int)
     active_long = False
@@ -147,12 +168,7 @@ def _xau_signals(df: pd.DataFrame) -> pd.Series:
         if active_long:
             sig_arr[i] = 1
 
-    sig = pd.Series(sig_arr, index=df.index, dtype=int)
-
-    # Bear bars are always flat (redundant safety override)
-    sig[bear] = 0
-
-    return sig
+    return pd.Series(sig_arr, index=df.index, dtype=int)
 
 
 # ── UNIFIED ENTRY POINT ───────────────────────────────────────────────────────
