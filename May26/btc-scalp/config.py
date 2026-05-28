@@ -52,8 +52,8 @@ STRAT_B = {
     "rsi_long_max":       42,
     "rsi_short_min":      58,
     "vol_spike_mult":     1.5,       # block if volume > 1.5× avg (news spike)
-    "atr_sl_mult":        0.5,
-    "time_exit_bars":     6,         # 6 × 15M = 90 minutes
+    "atr_sl_mult":        0.5,        # reverted: 1.0 → 0.5 (tighter SL, midpoint TP)
+    "time_exit_bars":    12,         # extended: 6 → 12 bars = 3 hours
 }
 
 # ── STRATEGY C — EMA Pullback ─────────────────────────────────────────────────
@@ -62,11 +62,41 @@ STRAT_C = {
     "rsi_period":         14,
     "rsi_pb_lo":          38,
     "rsi_pb_hi":          52,
-    "ema_touch_pct":       0.3,       # ±0.3% of EMA20 counts as a "touch" (widened from 0.1%)
-    "red_bars_required":   2,        # at least 2 of last 3 bars bearish (for long)
-    "atr_tp_mult":        1.5,
+    "ema_touch_pct":       0.6,       # ±0.6% of EMA20 counts as a "touch" (widened)
+    "red_bars_required":   1,        # at least 1 of last 3 bars bearish (for long)
+    "atr_tp_mult":        1.8,       # raised: 1.5 → 1.8
     "atr_sl_mult":        0.8,
     "time_exit_bars":    12,         # 12 × 15M = 3 hours
+}
+
+# ── STRATEGY D — Manipulation Fade (ICT Fib 2.5/4.0) ─────────────────────────
+STRAT_D = {
+    # Setup candle detection
+    "big_body_mult":     1.5,   # body > 1.5× avg body → "big" candle
+    "key_level_pct":     0.015, # setup candle high/low within 1.5% of N-bar extreme
+    "atr_spike_thresh":  2.5,   # skip if ATR > 2.5× avg at setup (news candle)
+    "atr_news_thresh":   3.0,   # skip if any of last 4 bars had ATR > 3.0× avg
+
+    # Fib extension levels
+    "fib_entry":         2.5,   # entry at 2.5 extension of manipulation leg
+    "fib_stop":          4.0,   # stop loss at 4.0 extension (invalidation)
+
+    # Displacement confirmation
+    "disp_body_mult":    0.5,   # displacement bar body > 0.5× avg body (relaxed)
+
+    # Trade management
+    "stop_buffer_atr":   0.1,   # ATR buffer added to fib_stop for actual SL
+    "min_rr":            1.5,   # skip signal if fib TP/SL ratio < 1.5
+    "time_exit_bars":   16,     # 16 × 15M = 4 hours max hold
+
+    # Staleness
+    "staleness_bars":   20,     # invalidate setup if manipulation leg > 20 bars old
+
+    # Confluence scores (HIGH_CONFLUENCE flag)
+    "conf_roll50_pct":   0.003, # near 50-bar H/L within 0.3% → +1 confluence
+    "conf_vwap_dev":     0.004, # near VWAP within 0.4% → +1 confluence
+    "conf_rsi_bull":    35,     # RSI < 35 for bull fade → +1 confluence
+    "conf_rsi_bear":    65,     # RSI > 65 for bear fade → +1 confluence
 }
 
 # ── ML FILTER ─────────────────────────────────────────────────────────────────
@@ -75,7 +105,7 @@ STRAT_C = {
 # a single model cannot learn trend vs reversion vs burst patterns together.
 ML_PER_STRAT = {
     "A": {
-        "threshold":    0.56,   # higher bar — breakout false positives are costly
+        "threshold":    0.54,   # lowered: 0.56 → 0.54 to recover filtered signals
         "train_weeks":  8,      # longer window: A fires ~0.9/day → need 8w for ~50 samples
         "test_weeks":   1,
         "min_samples":  40,
@@ -84,13 +114,19 @@ ML_PER_STRAT = {
         "threshold":    0.51,   # lower bar — natural reversion edge, vol already filters
         "train_weeks":  4,
         "test_weeks":   1,
-        "min_samples":  120,
+        "min_samples":  60,     # lowered: 120 → 60 (was skipping 83% of windows)
     },
     "C": {
-        "threshold":    0.52,   # secondary check; 1H alignment already gates heavily
-        "train_weeks": 16,      # wide window: C fires rarely, need history for samples
+        "threshold":    0.52,   # not used — C skips ML entirely (too few signals)
+        "train_weeks": 16,
         "test_weeks":   1,
         "min_samples":  20,
+    },
+    "D": {
+        "threshold":    0.52,   # 0.50 for HIGH_CONFLUENCE signals
+        "train_weeks": 12,
+        "test_weeks":   1,
+        "min_samples":  40,
     },
 }
 
@@ -116,10 +152,13 @@ ML = {
 # ── BACKTEST ──────────────────────────────────────────────────────────────────
 BT = {
     "initial_capital":      10_000,
-    "commission":           0.0005,  # 0.05% per side (maker fee)
+    "commission":           0.0005,  # 0.05% per side (taker fee)
     "slippage":             0.0002,  # 0.02% adverse fill
     "max_concurrent":            3,  # max 1 per strategy simultaneously
     "daily_loss_limit_pct":   2.0,   # halt trading day if down 2%
+    # Strategy A variable risk sizing
+    "MAX_RISK_PCT_HIGH_VOL": 0.01,   # 1% in HIGH_VOL_CHOP (costs eat edge)
+    "MAX_RISK_PCT_NORMAL":   0.02,   # 2% in all other states
     "no_overnight_close_utc": 23.75, # 23:45 UTC decimal
     "no_overnight_open_utc":  0.25,  # 00:15 UTC decimal
 

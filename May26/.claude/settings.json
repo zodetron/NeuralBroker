@@ -21,7 +21,10 @@
       "Bash(venv/bin/python3 fetch_data.py)",
       "Bash(venv/bin/python3 run_phase3.py)",
       "Bash(venv/bin/python3 run_phase4.py)",
-      "Bash(venv/bin/python3 run_phase5.py)"
+      "Bash(venv/bin/python3 run_phase5.py)",
+      "Bash(venv/bin/python3 run_phase6.py)",
+      "Bash(venv/bin/python3 run_phase6_v2.py)",
+      "Bash(venv/bin/python3 run_phase6_v3.py)"
     ]
   }
 }

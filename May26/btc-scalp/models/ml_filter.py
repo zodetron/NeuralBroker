@@ -48,8 +48,9 @@ warnings.filterwarnings("ignore")
 # (mirrors the backtest engine params for each strategy)
 _TRADE_CFG: Dict[str, dict] = {
     "A": {"tp_mult": 1.2,  "sl_mult": 0.6, "time_exit": 8,  "tp_type": "atr"},
-    "B": {"tp_mult": None, "sl_mult": 0.5, "time_exit": 6,  "tp_type": "vwap"},
+    "B": {"tp_mult": None, "sl_mult": 1.0, "time_exit": 6,  "tp_type": "vwap_mid"},
     "C": {"tp_mult": 1.5,  "sl_mult": 0.8, "time_exit": 12, "tp_type": "atr"},
+    "D": {"tp_mult": None, "sl_mult": None, "time_exit": 16, "tp_type": "fixed"},
 }
 
 # ── FEATURE COLUMNS ───────────────────────────────────────────────────────────
@@ -64,6 +65,8 @@ _STRAT_FEATS: Dict[str, List[str]] = {
     "A": _COMMON_FEATS + ["vol_ratio_sig", "conf_bonus",    "breakout_strength"],
     "B": _COMMON_FEATS + ["rsi14",         "vwap_dev_pct",  "vwap_atr_ratio"  ],
     "C": _COMMON_FEATS + ["rsi14",         "ema_dist_pct",  "adx_1h"          ],
+    "D": _COMMON_FEATS + ["rsi14",         "vwap_dev_pct",  "rr",
+                          "conf_score",    "high_confluence","setup_age_bars"  ],
 }
 
 
@@ -109,13 +112,20 @@ def build_labels(
         direction = int(row["direction"])
         atr       = float(row["atr_14"])
 
-        # TP target
-        if tp_type == "vwap" and has_vwap:
-            tp_price = float(row["vwap"])          # mean-reversion to VWAP
+        # TP / SL targets
+        if tp_type == "vwap_mid" and has_vwap:
+            # 50% of distance from entry to VWAP (tighter, more achievable)
+            vwap_val = float(row["vwap"])
+            tp_price = entry + 0.5 * (vwap_val - entry)
+        elif tp_type == "fixed" and "tp_price" in signals.columns:
+            tp_price = float(row["tp_price"])
         else:
             tp_price = entry + direction * tp_mult * atr
 
-        sl_price = entry - direction * sl_mult * atr
+        if tp_type == "fixed" and "sl_price" in signals.columns:
+            sl_price = float(row["sl_price"])
+        else:
+            sl_price = entry - direction * sl_mult * atr
 
         hit = 0   # default: time exit (loss)
         for k in range(1, max_bars + 1):
@@ -207,7 +217,8 @@ def build_features(
 
     # Strategy-specific columns from the signal DataFrame
     for col in ["rsi14", "vwap_dev_pct", "ema_dist_pct", "vol_ratio",
-                "adx_1h", "conf_bonus"]:
+                "adx_1h", "conf_bonus", "rr", "conf_score", "high_confluence",
+                "setup_age_bars"]:
         X[col] = signals[col].values if col in signals.columns else 0.0
 
     # Derived strategy-specific features
@@ -322,6 +333,15 @@ def run_walk_forward(
         sigs["ml_signal"]     = 0
         return sigs
 
+    # Strategy C: skip ML entirely — all signals pass (too few for reliable WFO)
+    if strategy_key == "C":
+        print(f"\n  Strategy C — ML SKIPPED (insufficient signal frequency for WFO)")
+        print(f"  All {len(signals):,} signals marked ml_signal=1, confidence=1.0")
+        sigs = signals.copy()
+        sigs["ml_confidence"] = 1.0
+        sigs["ml_signal"]     = 1
+        return sigs
+
     print(f"\n  {'─'*62}")
     print(f"  Strategy {strategy_key} — XGBoost Walk-Forward")
     print(f"  Train: {train_weeks}w  |  Test: {test_weeks}w  |  "
@@ -401,7 +421,18 @@ def run_walk_forward(
     # ── Attach confidence back to original signals ────────────────────────────
     sigs = signals.copy()
     sigs["ml_confidence"] = pd.Series(oos_records).reindex(sigs.index)
-    sigs["ml_signal"]     = (sigs["ml_confidence"] >= threshold).astype(int)
+
+    if strategy_key == "D" and "high_confluence" in sigs.columns:
+        # HIGH_CONFLUENCE signals use a lower threshold (0.50) for more passes
+        hc_thresh = 0.50
+        sigs["ml_signal"] = np.where(
+            sigs["high_confluence"] == 1,
+            (sigs["ml_confidence"] >= hc_thresh).astype(int),
+            (sigs["ml_confidence"] >= threshold).astype(int),
+        )
+    else:
+        sigs["ml_signal"] = (sigs["ml_confidence"] >= threshold).astype(int)
+
     sigs.loc[sigs["ml_confidence"].isna(), "ml_signal"] = 0
 
     # ── Report ────────────────────────────────────────────────────────────────
