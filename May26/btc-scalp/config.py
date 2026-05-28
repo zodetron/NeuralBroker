@@ -47,7 +47,7 @@ STRAT_A = {
 # ── STRATEGY B — VWAP Reversion ───────────────────────────────────────────────
 STRAT_B = {
     "vwap_reset_hour":    0,         # reset VWAP at UTC midnight
-    "vwap_band_pct":      0.0035,    # 0.35% from VWAP
+    "vwap_band_pct":      0.0050,    # 0.50% from VWAP (tightened from 0.35%)
     "rsi_period":         14,
     "rsi_long_max":       42,
     "rsi_short_min":      58,
@@ -62,15 +62,40 @@ STRAT_C = {
     "rsi_period":         14,
     "rsi_pb_lo":          38,
     "rsi_pb_hi":          52,
-    "red_bars_required":   3,        # previous N bars must be bearish (for long)
+    "ema_touch_pct":       0.3,       # ±0.3% of EMA20 counts as a "touch" (widened from 0.1%)
+    "red_bars_required":   2,        # at least 2 of last 3 bars bearish (for long)
     "atr_tp_mult":        1.5,
     "atr_sl_mult":        0.8,
     "time_exit_bars":    12,         # 12 × 15M = 3 hours
 }
 
 # ── ML FILTER ─────────────────────────────────────────────────────────────────
+# Per-strategy tiered thresholds — separate model per strategy.
+# Rationale: each strategy fires in different market conditions;
+# a single model cannot learn trend vs reversion vs burst patterns together.
+ML_PER_STRAT = {
+    "A": {
+        "threshold":    0.56,   # higher bar — breakout false positives are costly
+        "train_weeks":  8,      # longer window: A fires ~0.9/day → need 8w for ~50 samples
+        "test_weeks":   1,
+        "min_samples":  40,
+    },
+    "B": {
+        "threshold":    0.51,   # lower bar — natural reversion edge, vol already filters
+        "train_weeks":  4,
+        "test_weeks":   1,
+        "min_samples":  120,
+    },
+    "C": {
+        "threshold":    0.52,   # secondary check; 1H alignment already gates heavily
+        "train_weeks": 16,      # wide window: C fires rarely, need history for samples
+        "test_weeks":   1,
+        "min_samples":  20,
+    },
+}
+
 ML = {
-    "min_confidence":  0.54,
+    "min_confidence":  0.54,   # legacy default — not used in Phase 5 (per-strat instead)
     "wf_train_weeks":   4,
     "wf_test_weeks":    1,
     "forward_bars":     4,           # label: does trade hit TP within 4 bars?
@@ -91,12 +116,27 @@ ML = {
 # ── BACKTEST ──────────────────────────────────────────────────────────────────
 BT = {
     "initial_capital":      10_000,
-    "commission":           0.0005,  # 0.05% maker fee per side
-    "slippage":             0.0002,  # 0.02% adverse
-    "max_concurrent":            3,  # max 1 per strategy at a time
-    "daily_loss_limit_pct":   2.0,   # stop trading day if down 2%
-    "no_overnight_close_utc": 23.75, # 23:45 UTC in decimal hours
-    "no_overnight_open_utc":  0.25,  # 00:15 UTC in decimal hours
+    "commission":           0.0005,  # 0.05% per side (maker fee)
+    "slippage":             0.0002,  # 0.02% adverse fill
+    "max_concurrent":            3,  # max 1 per strategy simultaneously
+    "daily_loss_limit_pct":   2.0,   # halt trading day if down 2%
+    "no_overnight_close_utc": 23.75, # 23:45 UTC decimal
+    "no_overnight_open_utc":  0.25,  # 00:15 UTC decimal
+
+    # ── Dynamic spread ────────────────────────────────────────────────────────
+    # BTC 15M spreads vary by session liquidity and volatility regime.
+    # Applied once at trade entry (half-spread cost, representing crossing the book).
+    "spread_normal":         0.0001,  # 0.01%  — normal market hours
+    "spread_low_liq":        0.0003,  # 0.03%  — 02:00–06:00 UTC (Asian off-hours)
+    "spread_high_vol":       0.0005,  # 0.05%  — ATR spike > 3× avg
+    "spread_atr_mult_thresh": 3.0,    # ATR ratio above which high-vol spread applies
+    "spread_low_liq_start":    2,     # UTC hour range start (inclusive)
+    "spread_low_liq_end":      6,     # UTC hour range end   (inclusive)
+
+    # Round-trip cost summary (reference only — computed dynamically):
+    #   Normal:       commission 0.10% + spread 0.01% + slippage 0.02% = 0.13%
+    #   Low liquidity: 0.10% + 0.03% + 0.02% = 0.15%
+    #   High vol:      0.10% + 0.05% + 0.02% = 0.17%
 }
 
 # ── WFO ───────────────────────────────────────────────────────────────────────

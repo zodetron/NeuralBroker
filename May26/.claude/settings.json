@@ -18,7 +18,10 @@
       "Bash(venv/bin/pip install *)",
       "Bash(venv/bin/python3 --version)",
       "Bash(venv/bin/python3 -c \"import pandas, numpy, scipy, ccxt, xgboost, sklearn, matplotlib, seaborn, plotly, pyarrow, ta; print\\('all core imports OK'\\)\")",
-      "Bash(venv/bin/python3 fetch_data.py)"
+      "Bash(venv/bin/python3 fetch_data.py)",
+      "Bash(venv/bin/python3 run_phase3.py)",
+      "Bash(venv/bin/python3 run_phase4.py)",
+      "Bash(venv/bin/python3 run_phase5.py)"
     ]
   }
 }
