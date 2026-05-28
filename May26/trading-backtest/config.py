@@ -8,7 +8,7 @@ from pathlib import Path
 # ── PATHS ─────────────────────────────────────────────────────────────────────
 ROOT    = Path(__file__).parent
 DATA    = ROOT / "data"
-RESULTS = ROOT / "results" / "xau_v3b"
+RESULTS = ROOT / "results" / "btc_v4"
 RESULTS.mkdir(parents=True, exist_ok=True)
 
 # ── ASSETS ────────────────────────────────────────────────────────────────────
@@ -85,6 +85,15 @@ STRAT = {
     # Bear regime
     "allow_shorting":   True,     # BTC: allow short positions in Bear (volume-confirmed breakdown)
 
+    # Mode 2: BTC pullback entry (Bull regime only)
+    "pullback_rsi_min":     42,   # RSI lower bound — cooling not collapsing
+    "pullback_rsi_max":     58,   # RSI upper bound — not overbought
+    "pullback_adx_min":     22,   # trend must still be present
+    "pullback_min_days":     3,   # bars since last entry of any type
+
+    # Adaptive ML floor: ML cannot block more than this fraction of confirmed signals
+    "ml_max_block_pct":   0.60,   # if >60% would be blocked, lower threshold until 40% pass
+
     # ATR window used for sizing and stops
     "atr_window":       14,
 
@@ -111,7 +120,7 @@ STRAT = {
 # ── ML FILTER (XGBoost) ───────────────────────────────────────────────────────
 ML = {
     "forward_days":           5,      # label = 1 if fwd return > 0 over next 5d
-    "min_confidence":         0.62,   # ML gate re-enabled: XAU hybrid Bull+BB signals have better AUC
+    "min_confidence":         0.58,   # base threshold; adaptive floor prevents blocking >60% of confirmed signals
     "wf_train_months":        12,     # walk-forward: train window
     "wf_test_months":         3,      # walk-forward: test window
     "min_train_samples":      200,    # skip window if fewer training samples

@@ -60,112 +60,153 @@ def _regime_masks(df: pd.DataFrame):
     return bull, side, bear
 
 
-# ── BTC SIGNAL (volume-confirmed breakout) ────────────────────────────────────
+# ── BTC SIGNAL (breakout + pullback) ─────────────────────────────────────────
 
-def _btc_signals(df: pd.DataFrame) -> pd.Series:
+def _btc_signals(df: pd.DataFrame):
     """
-    Improvement 1: volume-confirmed N-day breakout.
-    Improvement 3: ADX trend-strength gate.
+    Mode 1 — volume-confirmed N-day breakout (Bull) + breakdown (Bear).
+    Mode 2 — pullback entry in Bull regime:
+        price between SMA20 and SMA50, RSI 42-58, ADX > 22,
+        minimum 3 bars since last entry of any type.
+
+    Returns (sig, mode) — both pd.Series aligned to df.index.
+    mode: 0=flat, 1=breakout/breakdown, 2=pullback long.
     """
     allow    = STRAT["allow_shorting"]
     vol_mult = STRAT.get("vol_mult", 1.5)
     adx_min  = STRAT.get("adx_bull_min", 25)
 
+    pb_rsi_lo = STRAT.get("pullback_rsi_min", 42)
+    pb_rsi_hi = STRAT.get("pullback_rsi_max", 58)
+    pb_adx    = STRAT.get("pullback_adx_min", 22)
+    pb_gap    = STRAT.get("pullback_min_days", 3)
+
     bull, side, bear = _regime_masks(df)
 
-    sig = pd.Series(0, index=df.index, dtype=int)
-
-    # Volume confirmation mask (applies to both long and short)
     vol_ok = df["vol_ratio_20"] > vol_mult
-
-    # ADX trend confirmation (strong trend required for breakout)
     adx_ok = df["adx_14"] > adx_min
 
-    # Long: breakout above 20d high in Bull regime
-    long_cond = (
+    # ── Mode 1 long: breakout above 20d high in Bull regime ──────────────────
+    breakout_long = (
         bull
-        & (df["close"] > df["roll_high_20"])   # closes above prior 20d high
+        & (df["close"] > df["roll_high_20"])
         & vol_ok
         & adx_ok
-    )
-    sig[long_cond] = 1
+    ).values
 
-    # Short: break below 20d low in Bear regime
+    # ── Mode 2: pullback entry in Bull regime ─────────────────────────────────
+    # price pulled back below SMA20 but still above SMA50 → in the "pullback zone"
+    # RSI cooling (42-58), ADX still showing trend (>22)
+    pullback_cond = (
+        bull
+        & (df["close"] < df["bb_mid"])        # below SMA20: pulled back
+        & (df["sma50_dist"] > 0)              # still above SMA50: trend intact
+        & (df["rsi_14"] >= pb_rsi_lo)
+        & (df["rsi_14"] <= pb_rsi_hi)
+        & (df["adx_14"] > pb_adx)
+    ).values
+
+    # ── Mode 1 short: breakdown below 20d low in Bear regime ──────────────────
     if allow:
-        short_cond = (
+        breakdown_short = (
             bear
             & (df["close"] < df["roll_low_20"])
             & vol_ok
             & adx_ok
-        )
-        sig[short_cond] = -1
+        ).values
+    else:
+        breakdown_short = np.zeros(len(df), dtype=bool)
 
-    return sig
+    # ── Combine with min_days_since_entry gap for Mode 2 ──────────────────────
+    sig_arr  = np.zeros(len(df), dtype=int)
+    mode_arr = np.zeros(len(df), dtype=int)
+    last_entry = -999   # bar index of last entry (any type)
+
+    for i in range(len(df)):
+        if breakout_long[i]:
+            sig_arr[i]  = 1
+            mode_arr[i] = 1
+            last_entry  = i
+        elif pullback_cond[i] and (i - last_entry) >= pb_gap:
+            sig_arr[i]  = 1
+            mode_arr[i] = 2
+            last_entry  = i
+
+        if breakdown_short[i]:
+            sig_arr[i]  = -1
+            mode_arr[i] = 1   # shorts are always Mode 1
+
+    sig  = pd.Series(sig_arr,  index=df.index, dtype=int)
+    mode = pd.Series(mode_arr, index=df.index, dtype=int)
+    return sig, mode
 
 
-# ── XAU SIGNAL (Bollinger Band mean-reversion) ────────────────────────────────
+# ── XAU SIGNAL (v3b hybrid: Bull=momentum, Sideways=BB mean-reversion) ────────
 
 def _xau_signals(df: pd.DataFrame) -> pd.Series:
     """
-    Improvement 2: BB mean-reversion on daily bars with sticky hold.
-    Improvement 3: ADX ranging gate (ADX < adx_bear_max) on ENTRY only.
+    v3b hybrid regime strategy for XAU:
 
-    Sticky logic: once price touches lower BB (entry trigger), signal stays
-    LONG until price reaches the upper BB or regime turns Bear.  This lets
-    trades run to TP/SL instead of exiting the moment price leaves the lower
-    band (which averaged 2.7 days — not enough for 3×ATR target).
+    BULL regime   → 20d-high momentum breakout + ADX > adx_bull_min_xau.
+                    Bar-by-bar signal: stays 1 while close > 20d high AND Bull.
+                    Gold in Bull regimes trends cleanly — ride it, don't fade it.
+
+    SIDEWAYS regime → BB lower-band mean-reversion, sticky hold to bb_upper.
+                    Entry: first touch below bb_lower (ADX < adx_bear_max).
+                    Exit: close reaches bb_upper (natural reversion target).
+
+    BEAR regime   → flat (unchanged: violent gold crashes, stay out).
+
+    Interaction: if a Sideways sticky position is open when regime turns Bull
+    and a breakout fires, the position continues held (signal stays 1 from both
+    conditions). The engine doesn't add to an open position (no pyramiding).
     """
-    allow   = STRAT["allow_shorting"]
-    adx_max = STRAT.get("adx_bear_max", 25)
+    adx_max_mr = STRAT.get("adx_bear_max", 25)       # mean-rev entry: ADX < 25
+    adx_min_mo = STRAT.get("adx_bull_min_xau", 20)   # Bull momentum: ADX > 20
 
     bull, side, bear = _regime_masks(df)
 
-    # Numpy arrays for the inner loop (faster than .iloc)
-    close     = df["close"].values
-    bb_lower  = df["bb_lower"].values
-    bb_upper  = df["bb_upper"].values
-    adx       = df["adx_14"].values
-    is_bear   = bear.values
-    is_long_r = (side | bull).values   # Bull or Sideways = allowed regime
+    close    = df["close"].values
+    bb_lower = df["bb_lower"].values
+    bb_upper = df["bb_upper"].values
+    adx      = df["adx_14"].values
+    is_bull  = bull.values
+    is_side  = side.values
 
-    # SMA200 trend filter: block entries in persistent downtrends.
-    # Gold 2013-2015 crash (−40%) and 2022 decline generated false bb_lower
-    # touches that continued falling. Filtering when >8% below 200d SMA avoids
-    # the worst "falling knife" entries without sacrificing normal corrections.
-    if "sma200_dist" in df.columns:
-        sma200_ok = df["sma200_dist"].values > -8.0
-    else:
-        sma200_ok = np.ones(len(df), dtype=bool)
+    # === BULL REGIME: bar-by-bar 20d-high momentum breakout ==================
+    roll_high = (df["roll_high_20"].values if "roll_high_20" in df.columns
+                 else np.full(len(df), np.nan))
+    bull_momentum = (
+        is_bull
+        & (close > roll_high)
+        & (adx > adx_min_mo)
+    )
 
-    # "First touch" — price must cross FROM above TO at/below lower band.
-    # This prevents re-entry while already below the band (e.g., after a SL hit
-    # drove price further below bb_lower, which was the re-entry bug causing 143 trades).
+    # === SIDEWAYS REGIME: sticky BB mean-reversion ===========================
+    # "First touch" prevents re-entry while already below the band.
     prev_above_lower = np.concatenate([[True], close[:-1] > bb_lower[:-1]])
 
-    # Entry: first crossing below lower BB, ranging market, non-Bear, not deep downtrend
-    entry = (
-        is_long_r
+    entry_mr = (
+        is_side             # ONLY in Sideways; Bull regime gets momentum signal
         & (close <= bb_lower)
-        & prev_above_lower          # must have been above on previous bar
-        & (adx < adx_max)
-        & sma200_ok                 # not in persistent downtrend (>8% below SMA200)
+        & prev_above_lower
+        & (adx < adx_max_mr)
     )
-    # Exit: ONLY when price reaches upper BB (natural mean-reversion target).
-    # Bear regime does NOT force exit — HMM is too noisy (3.4-day avg duration,
-    # 1,738 transitions), so Bear labels pop up mid-session and cause premature
-    # exits well before price reaches bb_upper.
-    # The engine's SL (3×ATR) handles genuine bear-market risk.
-    # New entries are still blocked during Bear (entry requires is_long_r).
-    exit_ = close >= bb_upper
+    exit_mr = close >= bb_upper    # hold until price reaches upper band
 
-    sig_arr = np.zeros(len(df), dtype=int)
-    active_long = False
+    # === COMBINE ============================================================
+    sig_arr   = np.zeros(len(df), dtype=int)
+    active_mr = False              # is a Sideways sticky mean-rev trade open?
+
     for i in range(len(df)):
-        if exit_[i]:
-            active_long = False
-        if entry[i]:
-            active_long = True
-        if active_long:
+        # Mean-rev exit (sticky)
+        if exit_mr[i]:
+            active_mr = False
+        # Mean-rev entry (new first-touch in Sideways)
+        if entry_mr[i]:
+            active_mr = True
+        # Signal = 1 if either sticky mean-rev OR Bull momentum is active
+        if active_mr or bull_momentum[i]:
             sig_arr[i] = 1
 
     return pd.Series(sig_arr, index=df.index, dtype=int)
@@ -191,9 +232,10 @@ def compute_signals(feat_df: pd.DataFrame, asset_key: str = "BTC") -> pd.DataFra
     df = feat_df.copy()
 
     if asset_key == "BTC":
-        sig = _btc_signals(df)
+        sig, mode = _btc_signals(df)
     else:
-        sig = _xau_signals(df)
+        sig  = _xau_signals(df)
+        mode = pd.Series(0, index=df.index, dtype=int)
 
     # Mask rows where key features are NaN
     bad_mask = (
@@ -202,10 +244,12 @@ def compute_signals(feat_df: pd.DataFrame, asset_key: str = "BTC") -> pd.DataFra
         | df["bb_lower"].isna()
         | (df["roll_high_20"].isna() if "roll_high_20" in df.columns else False)
     )
-    sig[bad_mask] = 0
+    sig[bad_mask]  = 0
+    mode[bad_mask] = 0
 
-    df["raw_signal"] = sig
-    df["signal"]     = sig
+    df["raw_signal"]   = sig
+    df["signal"]       = sig
+    df["signal_mode"]  = mode
 
     return df
 

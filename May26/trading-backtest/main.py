@@ -236,7 +236,7 @@ def phase7(ml_results=None):
     _print_before_after(bt_results)
 
     print(f"\n✅ Phase 7 complete — backtest finished, equity charts and "
-          f"trade logs saved to /results/v3")
+          f"trade logs saved to /results/btc_v4")
     return bt_results
 
 
@@ -248,9 +248,9 @@ _V2_METRICS = {
             "annual_return_pct":  0.01, "max_drawdown_pct":  -2.56, "avg_trade_duration_days": 29.9},
 }
 
-# Live-trading readiness targets
+# Live-trading readiness targets (v4 BTC: tighter bar; XAU unchanged)
 _V3_TARGETS = {
-    "BTC": {"sharpe_ratio": 0.5,  "win_rate_pct": 52.0, "profit_factor": 1.3, "total_trades": 40},
+    "BTC": {"sharpe_ratio": 0.5,  "win_rate_pct": 55.0, "profit_factor": 1.5, "total_trades": 40},
     "XAU": {"sharpe_ratio": 0.4,  "win_rate_pct": 50.0, "profit_factor": 1.2, "total_trades": 30},
 }
 
@@ -290,7 +290,8 @@ def _print_before_after(bt_results: dict) -> None:
         targs = _V3_TARGETS[asset_key]
 
         strat_v2 = "weekly" if asset_key == "XAU" else "daily"
-        print(f"\n  {BOLD}{asset_key}{RESET}  (v2={strat_v2}/0.62  →  v3=daily/0.62/breakout+BB+ADX+trail)")
+        v_label  = "v4=daily/0.58/breakout+pullback+adaptive-ML" if asset_key == "BTC" else "v3=daily/0.58/hybrid+BB"
+        print(f"\n  {BOLD}{asset_key}{RESET}  (v2={strat_v2}/0.62  →  {v_label})")
         print(f"  {'Metric':<28} {'v2 (Before)':>14} {'v3 (After)':>14} {'Change':>12} {'Target':>10}")
         print(f"  {'─'*74}")
 

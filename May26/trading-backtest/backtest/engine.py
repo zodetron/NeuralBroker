@@ -48,6 +48,8 @@ class Trade:
         "entry_capital",
         # Improvement 4 — trailing stop fields
         "atr_at_entry", "trail_active", "trail_ref",
+        # Signal mode: 1=breakout/breakdown, 2=pullback
+        "signal_mode",
     ]
 
     def __init__(
@@ -55,6 +57,7 @@ class Trade:
         entry_date, direction, entry_price, units,
         stop_price, tp_price, entry_capital,
         atr_at_entry: float = 0.0,
+        signal_mode:  int   = 1,
     ):
         self.entry_date    = entry_date
         self.direction     = direction
@@ -72,6 +75,8 @@ class Trade:
         self.atr_at_entry  = atr_at_entry
         self.trail_active  = False
         self.trail_ref     = entry_price    # highest (long) or lowest (short) close seen
+        # Entry mode
+        self.signal_mode   = signal_mode
 
     def close(self, exit_date, exit_price: float, reason: str) -> None:
         self.exit_date   = exit_date
@@ -123,6 +128,9 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
     # Using close as entry proxy (open unavailable for daily data from yfinance/ccxt)
     sig_raw   = df["signal"].shift(1).fillna(0).astype(int)
     ml_sig    = df["ml_signal"].shift(1).fillna(0).astype(int)
+    sig_mode  = (df["signal_mode"].shift(1).fillna(0).astype(int)
+                 if "signal_mode" in df.columns
+                 else pd.Series(1, index=df.index, dtype=int))
 
     # Combined entry gate
     entry_sig = pd.Series(0, index=df.index, dtype=int)
@@ -245,6 +253,7 @@ def _run_asset(df: pd.DataFrame, asset_key: str = "BTC") -> Tuple[pd.Series, Lis
                         tp_price      = sizing["tp_price"],
                         entry_capital = capital,
                         atr_at_entry  = atr,
+                        signal_mode   = int(sig_mode.iloc[i]),
                     )
 
         # ── Mark-to-market equity ─────────────────────────────────────────────
@@ -376,6 +385,7 @@ def _save_trade_log(trades: List[Trade], asset_key: str) -> None:
             "entry_date":    t.entry_date.date(),
             "exit_date":     t.exit_date.date() if t.exit_date else "",
             "direction":     "LONG" if t.direction == 1 else "SHORT",
+            "signal_mode":   t.signal_mode,
             "entry_price":   round(t.entry_price, 4),
             "exit_price":    round(t.exit_price, 4) if t.exit_price else "",
             "units":         round(t.units, 6),
@@ -487,6 +497,20 @@ def _print_comparison(
         print(f"\n  Exit reasons:")
         for reason, count in reasons.items():
             print(f"    {reason:<12} {count:>6,}  ({count/len(trades)*100:.1f}%)")
+
+    # Mode 1 vs Mode 2 trade attribution (BTC only)
+    if trades and asset_key == "BTC":
+        m1 = [t for t in trades if t.signal_mode == 1]
+        m2 = [t for t in trades if t.signal_mode == 2]
+        print(f"\n  Trade attribution:")
+        print(f"    Mode 1 — Breakout/Breakdown : {len(m1):>3} trades"
+              f"  WR {len([t for t in m1 if t.pnl>0])/max(len(m1),1)*100:.0f}%"
+              f"  avg P&L ${np.mean([t.pnl for t in m1]):.2f}" if m1 else
+              f"    Mode 1 — Breakout/Breakdown :   0 trades")
+        print(f"    Mode 2 — Pullback           : {len(m2):>3} trades"
+              f"  WR {len([t for t in m2 if t.pnl>0])/max(len(m2),1)*100:.0f}%"
+              f"  avg P&L ${np.mean([t.pnl for t in m2]):.2f}" if m2 else
+              f"    Mode 2 — Pullback           :   0 trades")
 
     # Avg win vs avg loss comparison (key diagnostic for fill-lag fix)
     if trades:

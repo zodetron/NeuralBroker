@@ -30,7 +30,7 @@ from sklearn.metrics import classification_report, roc_auc_score, precision_scor
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import ML, RESULTS
+from config import ML, STRAT, RESULTS
 from features.engineer import FEATURE_COLS
 
 warnings.filterwarnings("ignore")
@@ -232,10 +232,33 @@ def run_walk_forward(
                   f"F1={f1:.3f}  AUC={auc:.3f}", flush=True)
 
     # ── Attach OOS confidence back to original df ─────────────────────────────
+    base_conf = ML["min_confidence"]
     if oos_records:
         oos_df = pd.DataFrame(oos_records).set_index("date")
         df["ml_confidence"] = oos_df["ml_confidence"]
-        df["ml_signal"]     = (df["ml_confidence"] >= ML["min_confidence"]).astype(int)
+
+        # Adaptive floor (BTC only): ML cannot block >60% of confirmed signals.
+        # If base threshold would block more, lower it until 40% pass.
+        effective_conf = base_conf
+        if asset_key == "BTC" and "signal" in df.columns:
+            max_block = STRAT.get("ml_max_block_pct", 0.60)
+            min_pass  = 1.0 - max_block                      # 0.40
+            oos_mask  = df["ml_confidence"].notna()
+            sig_mask  = oos_mask & (df["signal"] != 0)
+            n_sigs    = sig_mask.sum()
+            if n_sigs > 0:
+                conf_at_sigs = df.loc[sig_mask, "ml_confidence"]
+                n_pass       = (conf_at_sigs >= base_conf).sum()
+                pass_rate    = n_pass / n_sigs
+                if pass_rate < min_pass:
+                    # 60th-percentile value means 40% are ≥ that value
+                    effective_conf = float(np.percentile(conf_at_sigs, max_block * 100))
+                    print(f"  ⚡ Adaptive ML floor: base={base_conf:.2f} → "
+                          f"effective={effective_conf:.3f}  "
+                          f"(base would pass {pass_rate*100:.0f}% of signals; "
+                          f"floor raised to {min_pass*100:.0f}%)")
+
+        df["ml_signal"] = (df["ml_confidence"] >= effective_conf).astype(int)
     else:
         df["ml_confidence"] = np.nan
         df["ml_signal"]     = 0

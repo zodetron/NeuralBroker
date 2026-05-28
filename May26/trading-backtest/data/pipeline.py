@@ -256,3 +256,99 @@ def load_asset(key: str, force_refresh: bool = False) -> pd.DataFrame:
         return load_xau(force_refresh)
     else:
         raise ValueError(f"Unknown asset key '{key}'. Use 'BTC' or 'XAU'.")
+
+
+# ── BTC 4H FETCHER ────────────────────────────────────────────────────────────
+
+def _fetch_btc_4h_ccxt() -> pd.DataFrame:
+    """
+    Download BTC/USDT 4H OHLCV from Binance via ccxt.
+    Paginates from 2018-01-01 to present.
+    """
+    import ccxt
+
+    exchange = ccxt.binance({"enableRateLimit": True})
+    symbol   = "BTC/USDT"
+    since_ms = exchange.parse8601("2018-01-01T00:00:00Z")
+
+    all_ohlcv = []
+    page      = 0
+
+    print("  Downloading BTC/USDT 4H from Binance …", end="", flush=True)
+    while True:
+        batch = exchange.fetch_ohlcv(symbol, "4h", since=since_ms, limit=1000)
+        if not batch:
+            break
+        all_ohlcv.extend(batch)
+        page += 1
+        print(f" [{page}]", end="", flush=True)
+        if len(batch) < 1000:
+            break
+        since_ms = batch[-1][0] + 1
+        time.sleep(exchange.rateLimit / 1000)
+
+    print(f"\n  Fetched {len(all_ohlcv):,} 4H candles total.")
+
+    cols = ["date", "open", "high", "low", "close", "volume"]
+    df   = pd.DataFrame(all_ohlcv, columns=cols)
+    df["date"] = pd.to_datetime(df["date"], unit="ms", utc=True)
+    df.set_index("date", inplace=True)
+    return df
+
+
+def _clean_4h(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleaning for 4H crypto bars (trades 24/7, no weekend gaps).
+    Keeps full UTC datetime index (does NOT strip time component).
+    """
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col not in df.columns:
+            df[col] = np.nan
+    df = df[["open", "high", "low", "close", "volume"]]
+    df = df[df["close"].notna() & (df["close"] > 0)]
+    # Fill isolated gaps (≤2 consecutive missing 4H bars)
+    df = df.asfreq("4h").ffill(limit=2)
+    df = df[df["close"].notna()]
+    df = df[~df.index.duplicated(keep="first")]
+    df.sort_index(inplace=True)
+    return df
+
+
+def load_btc_4h(force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Load BTC/USD 4-hour OHLCV from Binance.
+    Fetches on first run and caches to data/btc_4h.csv.
+    Returns a UTC-datetime-indexed DataFrame.
+    """
+    from config import DATA
+    csv_path = DATA / "btc_4h.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if csv_path.exists() and not force_refresh:
+        print(f"  [BTC 4H] Loading from cache: {csv_path.name}")
+        df = pd.read_csv(csv_path, index_col="date", parse_dates=True)
+        df.index = pd.to_datetime(df.index, utc=True)
+    else:
+        print(f"  [BTC 4H] Cache not found — fetching from Binance …")
+        df = _fetch_btc_4h_ccxt()
+        df.to_csv(csv_path)
+        print(f"  [BTC 4H] Saved to {csv_path}")
+
+    df = _clean_4h(df)
+
+    start = pd.Timestamp("2018-01-01", tz="UTC")
+    df    = df[df.index >= start]
+
+    print(f"\n  {'─'*60}")
+    print(f"  BTC/USD  (Binance 4H)")
+    print(f"  {'─'*60}")
+    print(f"  Shape      : {df.shape[0]:,} rows × {df.shape[1]} columns")
+    print(f"  Date range : {df.index[0]}  →  {df.index[-1]}")
+    n_years = (df.index[-1] - df.index[0]).days / 365.25
+    print(f"  Coverage   : {n_years:.1f} years  "
+          f"({df.shape[0] / (n_years * 365.25 * 6):.1%} bar completeness vs 6×daily)")
+    print(f"  NaN counts : {df.isna().sum().to_dict()}")
+
+    return df

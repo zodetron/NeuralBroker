@@ -12,7 +12,8 @@
       "Bash(venv/bin/python3 -c ' *)",
       "Bash(venv/bin/python3 run_backtest.py)",
       "Bash(venv/bin/python3 main.py)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(venv/bin/python3 run_btc_4h.py)"
     ]
   }
 }
