@@ -244,7 +244,7 @@ def run_walk_forward(
             max_block = STRAT.get("ml_max_block_pct", 0.60)
             min_pass  = 1.0 - max_block                      # 0.40
             oos_mask  = df["ml_confidence"].notna()
-            sig_mask  = oos_mask & (df["signal"] != 0)
+            sig_mask  = oos_mask & (df["signal"] == 1)
             n_sigs    = sig_mask.sum()
             if n_sigs > 0:
                 conf_at_sigs = df.loc[sig_mask, "ml_confidence"]

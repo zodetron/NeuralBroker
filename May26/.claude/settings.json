@@ -13,7 +13,12 @@
       "Bash(venv/bin/python3 run_backtest.py)",
       "Bash(venv/bin/python3 main.py)",
       "Bash(python3 -c ' *)",
-      "Bash(venv/bin/python3 run_btc_4h.py)"
+      "Bash(venv/bin/python3 run_btc_4h.py)",
+      "Bash(python3 -m venv venv)",
+      "Bash(venv/bin/pip install *)",
+      "Bash(venv/bin/python3 --version)",
+      "Bash(venv/bin/python3 -c \"import pandas, numpy, scipy, ccxt, xgboost, sklearn, matplotlib, seaborn, plotly, pyarrow, ta; print\\('all core imports OK'\\)\")",
+      "Bash(venv/bin/python3 fetch_data.py)"
     ]
   }
 }

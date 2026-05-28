@@ -1,8 +1,9 @@
 """
 run_btc_4h.py — BTC 4-hour bar strategy backtest.
 
-Mode 1 only: HMM regime detection + volume-confirmed 20-bar high breakout
-+ ADX > 25 + ML confidence > 0.58, on 4H Binance bars from 2018.
+Mode 1 only: HMM regime detection + volume-confirmed 120-bar high breakout
+(≈ 20 calendar days × 6 bars/day) + ADX > 25 + ML confidence > 0.58,
+on 4H Binance bars from 2018.
 
 Sharpe is annualized using sqrt(365×6 = 2190) for 24/7 4H crypto,
 not the stock-market sqrt(252) used by the daily engine.
@@ -20,7 +21,8 @@ sys.path.insert(0, str(ROOT))
 import config as _cfg
 _cfg.RESULTS = ROOT / "results" / "btc_4h"
 _cfg.RESULTS.mkdir(parents=True, exist_ok=True)
-_cfg.STRAT["min_hold_bars"] = 5    # 5 × 4H = 20 hours minimum hold
+_cfg.FEAT["breakout_window"] = 120  # 20 calendar days × 6 bars/day
+_cfg.STRAT["min_hold_bars"] = 18   # 3 calendar days × 6 bars/day = 72H min hold
 _cfg.ML["min_confidence"]   = 0.58
 
 # ── Standard imports (after config override) ──────────────────────────────────
@@ -264,7 +266,7 @@ def main():
     print("  BTC 4H STRATEGY BACKTEST")
     print("═"*60)
     print(f"  Timeframe : 4-hour bars  (Binance BTC/USDT from 2018)")
-    print(f"  Strategy  : Mode 1 — volume-confirmed 20-bar breakout")
+    print(f"  Strategy  : Mode 1 — volume-confirmed 120-bar breakout (≈ 20 calendar days)")
     print(f"  Regime    : HMM 3-state (Bull/Sideways/Bear)")
     print(f"  ML gate   : XGBoost walk-forward, confidence > {ML['min_confidence']}")
     print(f"  Min hold  : {STRAT['min_hold_bars']} bars × 4H = "
