@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+body {
+  @apply bg-[#0d0d1a] text-gray-100;
+  font-family: ui-monospace, Consolas, monospace;
+  margin: 0;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #111122; }
+::-webkit-scrollbar-thumb { background: #444466; border-radius: 2px; }
