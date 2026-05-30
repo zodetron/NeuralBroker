@@ -4,3 +4,5 @@ HyperTesting XAUUSD/XAU_1m_data.csv
 __pycache__/
 *.pyc
 .DS_Store*.duckdb
+*.duckdb
+.DS_Store
